@@ -239,6 +239,11 @@ pub(crate) async fn execute_and_record_tool_calls(
             });
         }
 
+        // Record file access for preservation through compaction.
+        if let Some(ref mut tracker) = modules.file_tracker {
+            tracker.record_tool_access(&name, &arguments, round as usize);
+        }
+
         // Update tool filter usage counts.
         if let Some(filter) = tool_filter {
             filter.record_usage(&name);
@@ -264,6 +269,7 @@ pub(crate) async fn execute_and_record_tool_calls(
                 &mut modules.tool_metas,
                 model_for_round,
                 event_handler,
+                &modules.file_tracker,
             )
             .await;
         }

@@ -10,7 +10,7 @@
 //! Callers observe the loop via [`EventHandler`] events.
 
 use super::config::HarnessConfig;
-use super::events::{EventHandler, HarnessEvent, HarnessResult};
+use super::events::{EventHandler, EventResponse, HarnessEvent, HarnessResult};
 use super::execution::{execute_and_record_tool_calls, save_round_checkpoint, send_round_request};
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
@@ -18,6 +18,7 @@ use crate::agent::profile::AgentProfile;
 use crate::agent::prompt::reminders::{ReminderRegistry, RoundContext};
 use crate::agent::sub_agent::SharedResources;
 use crate::context::eviction::{self, ToolResultMeta};
+use crate::context::file_tracker::FileAccessTracker;
 use crate::context::layout::ContextLayout;
 use crate::context::summarizer::Summarizer;
 use crate::context::{ContextBudget, ContextUsage};
@@ -291,6 +292,7 @@ impl<'a> Harness<'a> {
                 &mut modules.tool_metas,
                 &model_for_round,
                 self.event_handler,
+                &modules.file_tracker,
             )
             .await;
 
@@ -510,6 +512,7 @@ pub(crate) struct ModuleState {
     pub(crate) tool_cache: Option<ToolResultCache>,
     pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) reminders: ReminderRegistry,
+    pub(crate) file_tracker: Option<FileAccessTracker>,
 }
 
 /// Values accumulated across rounds during a harness run.
@@ -576,6 +579,7 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         tool_cache,
         agent_profile,
         reminders: ReminderRegistry::with_defaults(),
+        file_tracker: Some(FileAccessTracker::new(5)),
     }
 }
 
@@ -771,6 +775,7 @@ async fn summarize_if_needed(
     tool_metas: &mut Vec<ToolResultMeta>,
     model_for_round: &str,
     event_handler: &dyn EventHandler,
+    file_tracker: &Option<FileAccessTracker>,
 ) {
     compact_if_needed(
         config,
@@ -781,6 +786,7 @@ async fn summarize_if_needed(
         tool_metas,
         model_for_round,
         event_handler,
+        file_tracker,
     )
     .await;
 }
@@ -800,6 +806,7 @@ pub(crate) async fn compact_if_needed(
     tool_metas: &mut Vec<ToolResultMeta>,
     model_for_round: &str,
     event_handler: &dyn EventHandler,
+    file_tracker: &Option<FileAccessTracker>,
 ) -> bool {
     if !config.summarizer.enabled {
         return false;
@@ -821,12 +828,39 @@ pub(crate) async fn compact_if_needed(
         return false;
     }
 
+    // ── Pre-compaction: collect preservation notes ──
+    let mut preservation_notes: Vec<String> = Vec::new();
+
+    // Fire PreCompaction event — handlers can return InjectMessage to preserve state.
+    if let Some(EventResponse::InjectMessage(msg)) =
+        event_handler.on_event(&HarnessEvent::PreCompaction)
+    {
+        preservation_notes.push(msg);
+    }
+
+    // Build file preservation note from tracker.
+    if let Some(tracker) = file_tracker {
+        let note = tracker.build_preservation_note();
+        if !note.is_empty() {
+            preservation_notes.push(note);
+        }
+    }
+
     // Pass the existing compressed history to the summarizer for merging.
     if let Some(existing) = layout.compressed_history() {
         summ.summary = Some(existing.to_string());
     }
 
-    let (sys_prompt, user_prompt) = summ.build_summarization_request(middle);
+    let (sys_prompt, mut user_prompt) = summ.build_summarization_request(middle);
+
+    // Append preservation notes to the summarization prompt.
+    if !preservation_notes.is_empty() {
+        user_prompt.push_str("\n\n=== PRESERVATION NOTES ===\n");
+        for note in &preservation_notes {
+            user_prompt.push_str(note);
+            user_prompt.push('\n');
+        }
+    }
     let summary_model = summ.summary_model(model_for_round).to_string();
 
     let summary_request = ChatRequest {

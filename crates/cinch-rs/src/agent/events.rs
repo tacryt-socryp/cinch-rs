@@ -77,6 +77,10 @@ pub enum HarnessEvent<'a> {
     },
     /// Context summarization occurred: middle-zone messages were compacted.
     Compaction { compaction_number: usize },
+    /// Fired before context compaction begins. Handlers can return
+    /// `EventResponse::InjectMessage(msg)` to preserve critical state
+    /// through compaction by including it in the summarization input.
+    PreCompaction,
     /// Model routing selected a different model for this round.
     ModelRouted { model: &'a str, round: u32 },
     /// Checkpoint saved after a round.
@@ -586,6 +590,9 @@ impl EventHandler for LoggingHandler {
             }
             HarnessEvent::Compaction { compaction_number } => {
                 info!("Context compaction #{compaction_number} completed");
+            }
+            HarnessEvent::PreCompaction => {
+                debug!("Pre-compaction event fired");
             }
             HarnessEvent::ModelRouted { model, round } => {
                 debug!("Round {round}: routed to model {model}");

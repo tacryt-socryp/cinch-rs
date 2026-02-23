@@ -24,6 +24,7 @@
 
 pub mod budget;
 pub mod eviction;
+pub mod file_tracker;
 pub mod layout;
 pub mod summarizer;
 

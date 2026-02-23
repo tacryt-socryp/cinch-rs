@@ -269,6 +269,9 @@ impl EventHandler for WebBroadcastHandler {
                     compaction_number: *compaction_number,
                 });
             }
+            HarnessEvent::PreCompaction => {
+                // No WebSocket message needed for pre-compaction events.
+            }
             HarnessEvent::ModelRouted { model, round } => {
                 self.broadcast(WsMessage::ModelRouted {
                     model: model.to_string(),
