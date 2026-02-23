@@ -103,6 +103,14 @@ impl ContextLayout {
         self.prefix = messages;
     }
 
+    /// Add multiple messages in batch. Each message is pushed through the
+    /// normal zone management logic.
+    pub fn push_messages(&mut self, msgs: impl IntoIterator<Item = Message>) {
+        for msg in msgs {
+            self.push_message(msg);
+        }
+    }
+
     /// Add a message to the conversation. The layout automatically manages
     /// which zone the message ends up in.
     pub fn push_message(&mut self, msg: Message) {
@@ -186,11 +194,11 @@ impl ContextLayout {
     /// Called after an external summarization step produces a summary string.
     /// `current_round` is used for cache-aware compaction spacing.
     pub fn apply_compaction(&mut self, summary: String, current_round: usize) {
-        // Merge with existing compressed history if present.
-        self.compressed_history = Some(match self.compressed_history.take() {
-            Some(existing) => format!("{existing}\n\n{summary}"),
-            None => summary,
-        });
+        // Replace compressed history with the new summary. The summarizer
+        // already receives the existing summary as context (via
+        // build_summarization_request), so the returned summary is a merged
+        // result that replaces the old one entirely.
+        self.compressed_history = Some(summary);
 
         // Clear the middle zone — it's been compressed into the summary.
         self.middle.clear();
@@ -217,6 +225,137 @@ impl ContextLayout {
     pub fn middle_len(&self) -> usize {
         self.middle.len()
     }
+
+    /// Total number of messages across all zones (excluding compressed history).
+    pub fn total_message_count(&self) -> usize {
+        self.prefix.len() + self.middle.len() + self.recency_window.len()
+    }
+
+    /// Get the messages in the middle zone (alias for `compactable_messages`).
+    pub fn middle_messages(&self) -> &[Message] {
+        &self.middle
+    }
+
+    /// Get mutable references to all non-prefix messages (middle + recency) in order.
+    ///
+    /// Used by eviction to modify tool result content in-place. Each entry is
+    /// a `(global_index, &mut Message)` pair where `global_index` is the
+    /// position in the flat `to_messages()` output (accounting for prefix and
+    /// compressed history messages).
+    pub fn flat_messages_mut(&mut self) -> Vec<(usize, &mut Message)> {
+        let prefix_len = self.prefix.len();
+        let history_msgs = if self.compressed_history.is_some() { 2 } else { 0 };
+        let offset = prefix_len + history_msgs;
+        let middle_len = self.middle.len();
+
+        let mut result: Vec<(usize, &mut Message)> = Vec::new();
+        for (i, msg) in self.middle.iter_mut().enumerate() {
+            result.push((offset + i, msg));
+        }
+        for (i, msg) in self.recency_window.iter_mut().enumerate() {
+            result.push((offset + middle_len + i, msg));
+        }
+        result
+    }
+
+    /// Return the index that the next pushed message would occupy in
+    /// `to_messages()` output. Used for tracking message positions for eviction.
+    pub fn next_message_index(&self) -> usize {
+        self.prefix.len()
+            + if self.compressed_history.is_some() { 2 } else { 0 }
+            + self.middle.len()
+            + self.recency_window.len()
+    }
+
+    /// Get a mutable reference to a message by its position in the
+    /// `to_messages()` output. Returns `None` for prefix and synthetic
+    /// compressed history messages.
+    pub fn message_at_mut(&mut self, index: usize) -> Option<&mut Message> {
+        let prefix_len = self.prefix.len();
+        if index < prefix_len {
+            return None; // prefix is immutable
+        }
+        let index = index - prefix_len;
+
+        let history_len = if self.compressed_history.is_some() { 2 } else { 0 };
+        if index < history_len {
+            return None; // synthetic compressed history messages
+        }
+        let index = index - history_len;
+
+        if index < self.middle.len() {
+            return self.middle.get_mut(index);
+        }
+        let index = index - self.middle.len();
+
+        self.recency_window.get_mut(index)
+    }
+
+    /// Get the keep_recent setting.
+    pub fn keep_recent(&self) -> usize {
+        self.keep_recent
+    }
+
+    /// Estimate tokens for a slice of messages.
+    fn estimate_tokens_for(messages: &[Message], chars_per_token: f64) -> usize {
+        let total_chars: usize = messages
+            .iter()
+            .map(|m| m.content.as_ref().map_or(0, |c| c.len()))
+            .sum();
+        (total_chars as f64 / chars_per_token) as usize
+    }
+
+    /// Compute a per-zone breakdown of estimated token usage.
+    pub fn breakdown(&self) -> ContextBreakdown {
+        let prefix_tokens = Self::estimate_tokens_for(&self.prefix, self.chars_per_token);
+
+        let compressed_history_tokens = self
+            .compressed_history
+            .as_ref()
+            .map(|s| {
+                // Account for the wrapping <context_summary> tags and assistant ack message
+                let summary_msg_chars = format!("<context_summary>\n{s}\n</context_summary>").len();
+                let ack_chars = "I've reviewed the context summary and will continue from where I left off.".len();
+                ((summary_msg_chars + ack_chars) as f64 / self.chars_per_token) as usize
+            })
+            .unwrap_or(0);
+
+        let middle_tokens = Self::estimate_tokens_for(&self.middle, self.chars_per_token);
+
+        let recency_msgs: Vec<&Message> = self.recency_window.iter().collect();
+        let recency_tokens = {
+            let total_chars: usize = recency_msgs
+                .iter()
+                .map(|m| m.content.as_ref().map_or(0, |c| c.len()))
+                .sum();
+            (total_chars as f64 / self.chars_per_token) as usize
+        };
+
+        let total_tokens = prefix_tokens + compressed_history_tokens + middle_tokens + recency_tokens;
+
+        ContextBreakdown {
+            prefix_tokens,
+            compressed_history_tokens,
+            middle_tokens,
+            recency_tokens,
+            total_tokens,
+        }
+    }
+}
+
+/// Per-zone breakdown of estimated context token usage.
+#[derive(Debug, Clone)]
+pub struct ContextBreakdown {
+    /// Estimated tokens in the pinned prefix zone.
+    pub prefix_tokens: usize,
+    /// Estimated tokens in the compressed history zone.
+    pub compressed_history_tokens: usize,
+    /// Estimated tokens in the middle zone (not yet compacted).
+    pub middle_tokens: usize,
+    /// Estimated tokens in the recency window.
+    pub recency_tokens: usize,
+    /// Total estimated tokens across all zones.
+    pub total_tokens: usize,
 }
 
 #[cfg(test)]
@@ -288,14 +427,50 @@ mod tests {
     }
 
     #[test]
-    fn incremental_compaction_merges_summaries() {
+    fn breakdown_reports_per_zone_tokens() {
+        let mut layout = ContextLayout::new(200_000).with_keep_recent(2);
+        layout.set_prefix(vec![Message::system("system prompt here")]);
+
+        // Push messages so some end up in middle, some in recency
+        for i in 0..4 {
+            layout.push_message(Message::user(&format!("message {i}")));
+        }
+
+        let bd = layout.breakdown();
+        assert!(bd.prefix_tokens > 0);
+        assert!(bd.middle_tokens > 0);
+        assert!(bd.recency_tokens > 0);
+        assert_eq!(bd.compressed_history_tokens, 0);
+        assert_eq!(
+            bd.total_tokens,
+            bd.prefix_tokens + bd.middle_tokens + bd.recency_tokens
+        );
+    }
+
+    #[test]
+    fn breakdown_includes_compressed_history() {
+        let mut layout = ContextLayout::new(200_000).with_keep_recent(2);
+        layout.set_prefix(vec![Message::system("sys")]);
+        layout.apply_compaction("Summary of work done so far.".into(), 5);
+
+        let bd = layout.breakdown();
+        assert!(bd.compressed_history_tokens > 0);
+    }
+
+    #[test]
+    fn incremental_compaction_replaces_summary() {
         let mut layout = ContextLayout::new(200_000).with_keep_recent(2);
 
         layout.apply_compaction("First summary.".into(), 5);
-        layout.apply_compaction("Second summary.".into(), 15);
+        assert_eq!(layout.compressed_history().unwrap(), "First summary.");
+
+        // Second compaction replaces (not concatenates) the first.
+        // The summarizer is responsible for merging old + new into the returned string.
+        layout.apply_compaction("Merged summary covering both phases.".into(), 15);
 
         let history = layout.compressed_history().unwrap();
-        assert!(history.contains("First summary."));
-        assert!(history.contains("Second summary."));
+        assert_eq!(history, "Merged summary covering both phases.");
+        // Verify the old summary is NOT present (no concatenation).
+        assert!(!history.contains("First summary."));
     }
 }

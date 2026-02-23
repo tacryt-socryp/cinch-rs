@@ -12,6 +12,7 @@ use crate::agent::checkpoint::Checkpoint;
 use crate::api::retry::{self, RetryConfig};
 use crate::context::ContextBudget;
 use crate::context::eviction::{self, ToolResultMeta};
+use crate::context::layout::ContextLayout;
 use crate::tools::core::ToolSet;
 use crate::tools::dag as tool_dag;
 use crate::tools::filter::ToolFilter;
@@ -89,6 +90,9 @@ pub(crate) async fn send_round_request(
 // ── Tool execution ────────────────────────────────────────────────
 
 /// Execute tool calls for a round: approval gates, caching, dispatch, and bookkeeping.
+///
+/// Pushes tool result messages into the [`ContextLayout`] and records eviction
+/// metadata using the layout's [`next_message_index()`](ContextLayout::next_message_index).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_and_record_tool_calls(
     config: &HarnessConfig,
@@ -96,7 +100,7 @@ pub(crate) async fn execute_and_record_tool_calls(
     event_handler: &dyn EventHandler,
     context_budget: &Option<ContextBudget>,
     tool_filter: &mut Option<ToolFilter>,
-    messages: &mut Vec<Message>,
+    layout: &mut ContextLayout,
     modules: &mut ModuleState,
     tool_calls: &[crate::ToolCall],
     round: u32,
@@ -125,7 +129,7 @@ pub(crate) async fn execute_and_record_tool_calls(
                     continue;
                 }
                 Some(EventResponse::InjectMessage(msg)) => {
-                    messages.push(Message::user(&msg));
+                    layout.push_message(Message::user(&msg));
                     denied_tools.push((
                         call.id.clone(),
                         call.function.name.clone(),
@@ -200,13 +204,14 @@ pub(crate) async fn execute_and_record_tool_calls(
     tool_results.extend(cache_hits);
     tool_results.extend(executed);
 
-    // Append results to messages with context budget advisories.
+    // Append results to layout with context budget advisories.
     for (call_id, name, arguments, mut result) in tool_results {
-        if let Some(budget) = context_budget
-            && let Some(advisory) = budget.advisory(messages)
-        {
-            result.push_str("\n\n");
-            result.push_str(&advisory);
+        if let Some(budget) = context_budget {
+            let current_messages = layout.to_messages();
+            if let Some(advisory) = budget.advisory(&current_messages) {
+                result.push_str("\n\n");
+                result.push_str(&advisory);
+            }
         }
 
         event_handler.on_event(&HarnessEvent::ToolResult {
@@ -215,8 +220,9 @@ pub(crate) async fn execute_and_record_tool_calls(
             result: &result,
         });
 
-        let message_index = messages.len();
-        messages.push(Message::tool_result(&call_id, result.clone()));
+        // Track the to_messages() index before pushing, for eviction.
+        let message_index = layout.next_message_index();
+        layout.push_message(Message::tool_result(&call_id, result.clone()));
 
         // Track tool result metadata for eviction.
         if config.eviction.enabled {

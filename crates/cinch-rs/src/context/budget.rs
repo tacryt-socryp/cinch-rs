@@ -33,6 +33,7 @@ const CRITICAL_THRESHOLD: f64 = 0.80;
 /// ```ignore
 /// let budget = ContextBudget::with_calibration("You are a helpful agent.", None)
 ///     .with_max_tokens(128_000)
+///     .with_output_reserve(4096)
 ///     .with_warning_message("Wrap up your research soon.")
 ///     .with_critical_message("Save your output NOW.");
 ///
@@ -47,6 +48,10 @@ const CRITICAL_THRESHOLD: f64 = 0.80;
 pub struct ContextBudget {
     /// Maximum context window in tokens.
     max_tokens: usize,
+    /// Tokens reserved for model output (per-response token limit).
+    output_reserve: usize,
+    /// Tokens reserved for system prompt overhead.
+    system_reserve: usize,
     /// Size of the system prompt in characters.
     system_prompt_chars: usize,
     /// Characters per token ratio (calibrated or default).
@@ -61,10 +66,13 @@ impl ContextBudget {
     /// Create a new context budget tracker with a calibrated chars-per-token
     /// ratio from historical API usage data. Pass `None` to use the default.
     pub fn with_calibration(system_prompt: &str, calibrated_cpt: Option<f64>) -> Self {
+        let cpt = calibrated_cpt.unwrap_or(DEFAULT_CHARS_PER_TOKEN);
         Self {
             max_tokens: DEFAULT_CONTEXT_WINDOW,
+            output_reserve: 0,
+            system_reserve: 0,
             system_prompt_chars: system_prompt.len(),
-            chars_per_token: calibrated_cpt.unwrap_or(DEFAULT_CHARS_PER_TOKEN),
+            chars_per_token: cpt,
             warning_message: None,
             critical_message: None,
         }
@@ -88,12 +96,37 @@ impl ContextBudget {
         self
     }
 
+    /// Set tokens reserved for model output (the per-response max_tokens limit).
+    pub fn with_output_reserve(mut self, tokens: usize) -> Self {
+        self.output_reserve = tokens;
+        self
+    }
+
+    /// Set tokens reserved for system prompt overhead.
+    pub fn with_system_reserve(mut self, tokens: usize) -> Self {
+        self.system_reserve = tokens;
+        self
+    }
+
     /// Return the maximum context window size in tokens.
     pub fn max_tokens(&self) -> usize {
         self.max_tokens
     }
 
+    /// Effective context window: max_tokens minus reserves for output and system prompt.
+    ///
+    /// All threshold calculations use this value instead of raw `max_tokens`
+    /// to ensure the model always has room for its response.
+    pub fn effective_max_tokens(&self) -> usize {
+        self.max_tokens
+            .saturating_sub(self.output_reserve)
+            .saturating_sub(self.system_reserve)
+    }
+
     /// Estimate the total tokens consumed by all messages.
+    ///
+    /// Usage percentage is computed against [`effective_max_tokens()`](Self::effective_max_tokens)
+    /// rather than raw `max_tokens`, so thresholds account for output and system reserves.
     pub fn estimate_usage(&self, messages: &[Message]) -> ContextUsage {
         let mut total_chars = self.system_prompt_chars;
 
@@ -104,7 +137,12 @@ impl ContextBudget {
         }
 
         let estimated_tokens = (total_chars as f64 / self.chars_per_token) as usize;
-        let usage_pct = estimated_tokens as f64 / self.max_tokens as f64;
+        let effective = self.effective_max_tokens();
+        let usage_pct = if effective > 0 {
+            estimated_tokens as f64 / effective as f64
+        } else {
+            1.0
+        };
 
         ContextUsage {
             estimated_tokens,
@@ -253,5 +291,42 @@ mod tests {
     fn with_max_tokens_override() {
         let budget = ContextBudget::with_calibration("test", None).with_max_tokens(100_000);
         assert_eq!(budget.max_tokens(), 100_000);
+    }
+
+    #[test]
+    fn effective_max_tokens_subtracts_reserves() {
+        let budget = ContextBudget::with_calibration("test", None)
+            .with_max_tokens(200_000)
+            .with_output_reserve(4096)
+            .with_system_reserve(1000);
+        assert_eq!(budget.effective_max_tokens(), 200_000 - 4096 - 1000);
+    }
+
+    #[test]
+    fn effective_max_tokens_saturates_at_zero() {
+        let budget = ContextBudget::with_calibration("test", None)
+            .with_max_tokens(1000)
+            .with_output_reserve(800)
+            .with_system_reserve(500);
+        assert_eq!(budget.effective_max_tokens(), 0);
+    }
+
+    #[test]
+    fn output_reserve_makes_thresholds_trigger_earlier() {
+        // With output_reserve, effective window is smaller, so same content
+        // hits thresholds at lower absolute token counts.
+        let budget_no_reserve = ContextBudget::with_calibration("sys", None)
+            .with_max_tokens(100_000);
+        let budget_with_reserve = ContextBudget::with_calibration("sys", None)
+            .with_max_tokens(100_000)
+            .with_output_reserve(20_000);
+
+        let messages = vec![make_message(&"a".repeat(200_000))];
+        let usage_no = budget_no_reserve.estimate_usage(&messages);
+        let usage_with = budget_with_reserve.estimate_usage(&messages);
+
+        // Same estimated tokens, but higher usage_pct with reserve.
+        assert_eq!(usage_no.estimated_tokens, usage_with.estimated_tokens);
+        assert!(usage_with.usage_pct > usage_no.usage_pct);
     }
 }

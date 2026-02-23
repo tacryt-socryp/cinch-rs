@@ -10,6 +10,7 @@
 //! recovers 10-100x more tokens than model reasoning occupies.
 
 use crate::Message;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 /// Prefix used for evicted tool result placeholders.
@@ -73,11 +74,30 @@ pub struct ToolResultMeta {
     pub char_count: usize,
 }
 
-/// Evict oldest tool results from a message list, replacing them with placeholders.
+/// Compute eviction priority for a tool result. Higher score = evict first.
 ///
-/// Iterates from oldest to newest, replacing tool results that are older than
-/// `min_age_rounds` and not in the protected set. Stops when the estimated
-/// total tokens drops below `target_tokens`.
+/// Considers three factors:
+/// - **Age**: older results are more likely stale.
+/// - **Size**: larger results free more context per eviction (log-scaled to
+///   prevent huge results from dominating).
+/// - **Tool type**: read-only tools (read_file, grep, find_files, list_files)
+///   get a 1.5x multiplier since their results can always be re-read from the
+///   environment, unlike mutation tool results.
+pub fn eviction_priority(meta: &ToolResultMeta, current_round: usize) -> f64 {
+    let age = (current_round.saturating_sub(meta.round)).max(1) as f64;
+    let size_factor = (meta.char_count.max(1) as f64).ln();
+    let tool_factor = match meta.tool_name.as_str() {
+        "read_file" | "grep" | "find_files" | "list_files" => 1.5,
+        _ => 1.0,
+    };
+    age * size_factor * tool_factor
+}
+
+/// Evict tool results from a message list by priority, replacing them with placeholders.
+///
+/// Candidates are sorted by [`eviction_priority()`] (highest first): large,
+/// old, read-only results are evicted before small, recent, or mutation results.
+/// Stops when the estimated total tokens drops below `target_tokens`.
 ///
 /// Returns the number of characters freed.
 pub fn evict_tool_results(
@@ -89,7 +109,7 @@ pub fn evict_tool_results(
 ) -> usize {
     let mut freed = 0;
 
-    // Sort candidates by round (oldest first).
+    // Sort candidates by priority (highest = evict first).
     let mut candidates: Vec<&ToolResultMeta> = tool_metas
         .iter()
         .filter(|m| {
@@ -97,7 +117,11 @@ pub fn evict_tool_results(
                 && current_round.saturating_sub(m.round) >= config.min_age_rounds
         })
         .collect();
-    candidates.sort_by_key(|m| m.round);
+    candidates.sort_by(|a, b| {
+        eviction_priority(b, current_round)
+            .partial_cmp(&eviction_priority(a, current_round))
+            .unwrap_or(Ordering::Equal)
+    });
 
     for meta in candidates {
         // Check if we've freed enough.
@@ -289,6 +313,87 @@ mod tests {
         let freed = evict_tool_results(&mut messages, &metas, 5, 0, &config);
 
         assert_eq!(freed, 0);
+    }
+
+    #[test]
+    fn priority_prefers_large_read_only_over_small_recent() {
+        // Large read_file from round 2 should have higher priority than
+        // small shell result from round 1 (even though shell is older).
+        let large_read = ToolResultMeta {
+            tool_name: "read_file".into(),
+            args_summary: "path=\"big.rs\"".into(),
+            round: 2,
+            message_index: 0,
+            char_count: 30_000,
+        };
+        let small_shell = ToolResultMeta {
+            tool_name: "shell".into(),
+            args_summary: "cmd=\"echo ok\"".into(),
+            round: 1,
+            message_index: 1,
+            char_count: 50,
+        };
+
+        let current_round = 5;
+        let p_read = eviction_priority(&large_read, current_round);
+        let p_shell = eviction_priority(&small_shell, current_round);
+
+        assert!(
+            p_read > p_shell,
+            "Large read_file (priority={p_read}) should be evicted before small shell (priority={p_shell})"
+        );
+    }
+
+    #[test]
+    fn eviction_order_respects_priority() {
+        let mut messages = vec![
+            Message::system("system"),
+            Message::user("task"),
+            make_tool_msg("c1", &"x".repeat(50)),     // small, round 1
+            make_tool_msg("c2", &"y".repeat(30_000)), // large read_file, round 2
+            make_tool_msg("c3", &"z".repeat(500)),     // medium, round 3
+        ];
+
+        let metas = vec![
+            ToolResultMeta {
+                tool_name: "shell".into(),
+                args_summary: "".into(),
+                round: 1,
+                message_index: 2,
+                char_count: 50,
+            },
+            ToolResultMeta {
+                tool_name: "read_file".into(),
+                args_summary: "path=\"big.rs\"".into(),
+                round: 2,
+                message_index: 3,
+                char_count: 30_000,
+            },
+            ToolResultMeta {
+                tool_name: "grep".into(),
+                args_summary: "pattern=\"TODO\"".into(),
+                round: 3,
+                message_index: 4,
+                char_count: 500,
+            },
+        ];
+
+        // Set target very low so only the highest-priority result gets evicted
+        // before we hit the target.
+        let config = EvictionConfig::new().with_min_age(1);
+        let freed = evict_tool_results(&mut messages, &metas, 5, 1000, &config);
+        assert!(freed > 0);
+
+        // The large read_file (index 3) should be evicted first due to
+        // highest priority (large size + read-only tool multiplier).
+        assert!(
+            messages[3]
+                .content
+                .as_ref()
+                .unwrap()
+                .starts_with(EVICTED_PREFIX),
+            "Large read_file should be evicted first"
+        );
     }
 
     #[test]

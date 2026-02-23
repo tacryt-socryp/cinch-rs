@@ -17,6 +17,7 @@ use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
 use crate::agent::profile::AgentProfile;
 use crate::agent::sub_agent::SharedResources;
 use crate::context::eviction::{self, ToolResultMeta};
+use crate::context::layout::ContextLayout;
 use crate::context::summarizer::Summarizer;
 use crate::context::{ContextBudget, ContextUsage};
 use crate::tools::cache::ToolResultCache;
@@ -191,7 +192,10 @@ impl<'a> Harness<'a> {
                 .find(|m| matches!(m.role, crate::MessageRole::System))
                 .and_then(|m| m.content.as_deref())
         {
-            self.context_budget = Some(ContextBudget::with_calibration(sys_content, None));
+            self.context_budget = Some(
+                ContextBudget::with_calibration(sys_content, None)
+                    .with_output_reserve(self.config.max_tokens as usize),
+            );
         }
 
         // Get tool definitions (may be filtered).
@@ -221,9 +225,16 @@ impl<'a> Harness<'a> {
             Vec::new()
         };
 
-        // Inject the planning prompt as a user message at the start.
+        // ── Initialize ContextLayout ──
+        // The initial messages (system prompt + user task) become the pinned prefix.
+        // All subsequent messages flow through the layout's zone management.
+        let mut layout = ContextLayout::new(self.config.context_window_tokens)
+            .with_keep_recent(self.config.keep_recent_messages);
+        layout.set_prefix(messages);
+
+        // Inject the planning prompt as a conversation message (not prefix).
         if self.config.plan_execute.enabled {
-            messages.push(Message::user(
+            layout.push_message(Message::user(
                 &self.config.plan_execute.config.planning_prompt,
             ));
         }
@@ -265,7 +276,7 @@ impl<'a> Harness<'a> {
             evict_if_needed(
                 &self.config,
                 &self.context_budget,
-                &mut messages,
+                &mut layout,
                 &modules.tool_metas,
                 round,
                 self.event_handler,
@@ -274,7 +285,7 @@ impl<'a> Harness<'a> {
                 &self.config,
                 self.client,
                 &self.context_budget,
-                &mut messages,
+                &mut layout,
                 &mut modules.summarizer,
                 &mut modules.tool_metas,
                 &model_for_round,
@@ -282,27 +293,30 @@ impl<'a> Harness<'a> {
             )
             .await;
 
-            // Context budget tracking for round start event.
+            // Context budget tracking and breakdown for round start event.
+            let api_messages = layout.to_messages();
             let usage = self
                 .context_budget
                 .as_ref()
-                .map(|b| b.estimate_usage(&messages))
+                .map(|b| b.estimate_usage(&api_messages))
                 .unwrap_or(ContextUsage {
                     estimated_tokens: 0,
                     max_tokens: 0,
                     usage_pct: 0.0,
                 });
+            let breakdown = layout.breakdown();
             self.event_handler.on_event(&HarnessEvent::RoundStart {
                 round: round + 1,
                 max_rounds: self.config.max_rounds,
                 context_usage: &usage,
+                context_breakdown: Some(&breakdown),
             });
 
             // ── Send request ──
             let completion = send_round_request(
                 &self.config,
                 self.client,
-                &messages,
+                &api_messages,
                 &model_for_round,
                 &tools_option,
                 self.event_handler,
@@ -344,7 +358,7 @@ impl<'a> Harness<'a> {
                     &self.config,
                     self.tools,
                     &completion,
-                    &mut messages,
+                    &mut layout,
                     acc.rounds_used,
                     self.event_handler,
                 )
@@ -420,7 +434,7 @@ impl<'a> Harness<'a> {
                     count: completion.tool_calls.len(),
                 });
 
-            messages.push(Message::assistant_tool_calls(completion.tool_calls.clone()));
+            layout.push_message(Message::assistant_tool_calls(completion.tool_calls.clone()));
 
             execute_and_record_tool_calls(
                 &self.config,
@@ -428,7 +442,7 @@ impl<'a> Harness<'a> {
                 self.event_handler,
                 &self.context_budget,
                 &mut self.tool_filter,
-                &mut messages,
+                &mut layout,
                 &mut modules,
                 &completion.tool_calls,
                 round,
@@ -436,10 +450,11 @@ impl<'a> Harness<'a> {
             .await;
 
             // ── Save checkpoint ──
+            let checkpoint_messages = layout.to_messages();
             save_round_checkpoint(
                 &modules.checkpoint_manager,
                 &acc.trace_id,
-                &messages,
+                &checkpoint_messages,
                 &acc.text_output,
                 round,
                 acc.total_prompt_tokens,
@@ -452,7 +467,7 @@ impl<'a> Harness<'a> {
         Ok(finalize_run(
             &self.config,
             acc,
-            messages,
+            layout.to_messages(),
             &mut modules,
             self.event_handler,
         ))
@@ -638,11 +653,14 @@ fn finalize_run(
 }
 
 /// Evict old tool results when context usage exceeds 80%.
-#[allow(clippy::ptr_arg)]
+///
+/// Operates on the [`ContextLayout`] by modifying messages in-place via
+/// [`message_at_mut()`](ContextLayout::message_at_mut). Tool result metadata
+/// indices correspond to positions in `to_messages()` output.
 fn evict_if_needed(
     config: &HarnessConfig,
     budget: &Option<ContextBudget>,
-    messages: &mut Vec<Message>,
+    layout: &mut ContextLayout,
     tool_metas: &[ToolResultMeta],
     round: u32,
     event_handler: &dyn EventHandler,
@@ -651,28 +669,59 @@ fn evict_if_needed(
         return;
     }
     let Some(budget) = budget else { return };
-    let usage = budget.estimate_usage(messages);
+    let api_messages = layout.to_messages();
+    let usage = budget.estimate_usage(&api_messages);
     if usage.usage_pct < 0.80 {
         return;
     }
-    let target_tokens = (budget.max_tokens() as f64 * 0.60) as usize;
-    let freed = eviction::evict_tool_results(
-        messages,
-        tool_metas,
-        round as usize,
-        target_tokens,
-        &config.eviction.config,
-    );
+    let target_tokens = (budget.effective_max_tokens() as f64 * 0.60) as usize;
+
+    // Run eviction on the layout's messages using message_at_mut for in-place modification.
+    let mut freed = 0;
+    let mut evicted_count = 0;
+
+    let mut candidates: Vec<&ToolResultMeta> = tool_metas
+        .iter()
+        .filter(|m| {
+            !config.eviction.config.protected_tools.contains(&m.tool_name)
+                && (round as usize).saturating_sub(m.round) >= config.eviction.config.min_age_rounds
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        eviction::eviction_priority(b, round as usize)
+            .partial_cmp(&eviction::eviction_priority(a, round as usize))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for meta in candidates {
+        // Check if we've freed enough by re-estimating.
+        let current_tokens = layout.estimate_tokens();
+        if current_tokens <= target_tokens {
+            break;
+        }
+
+        if let Some(msg) = layout.message_at_mut(meta.message_index)
+            && let Some(ref content) = msg.content
+        {
+            if content.starts_with(eviction::EVICTED_PREFIX) {
+                continue;
+            }
+
+            let placeholder = format!(
+                "[Cleared: {}({}) — {} chars, round {}]",
+                meta.tool_name, meta.args_summary, meta.char_count, meta.round,
+            );
+
+            let old_len = content.len();
+            let new_len = placeholder.len();
+            freed += old_len.saturating_sub(new_len);
+            evicted_count += 1;
+
+            msg.content = Some(placeholder);
+        }
+    }
+
     if freed > 0 {
-        let evicted_count = tool_metas
-            .iter()
-            .filter(|m| {
-                messages
-                    .get(m.message_index)
-                    .and_then(|msg| msg.content.as_ref())
-                    .is_some_and(|c| c.starts_with(crate::context::eviction::EVICTED_PREFIX))
-            })
-            .count();
         event_handler.on_event(&HarnessEvent::Eviction {
             freed_chars: freed,
             evicted_count,
@@ -681,12 +730,16 @@ fn evict_if_needed(
 }
 
 /// Summarize (compact) middle-zone messages when context usage is still over 80% after eviction.
+///
+/// Uses the [`ContextLayout`]'s compaction API: reads compactable messages from the
+/// middle zone, sends them to the summarizer LLM, and applies the result via
+/// [`apply_compaction()`](ContextLayout::apply_compaction).
 #[allow(clippy::too_many_arguments)]
 async fn summarize_if_needed(
     config: &HarnessConfig,
     client: &OpenRouterClient,
     budget: &Option<ContextBudget>,
-    messages: &mut Vec<Message>,
+    layout: &mut ContextLayout,
     summarizer: &mut Option<Summarizer>,
     tool_metas: &mut Vec<ToolResultMeta>,
     model_for_round: &str,
@@ -699,24 +752,23 @@ async fn summarize_if_needed(
         return;
     };
     let Some(budget) = budget else { return };
-    let usage = budget.estimate_usage(messages);
+    let api_messages = layout.to_messages();
+    let usage = budget.estimate_usage(&api_messages);
     if usage.usage_pct < 0.80 {
         return;
     }
 
-    let boundary = summ.boundary_index;
-    let messages_len = messages.len();
-    let keep_recent = config.keep_recent_messages;
-    if messages_len <= keep_recent + boundary + 2 {
-        return;
-    }
-    let end = messages_len.saturating_sub(keep_recent);
-    let span = &messages[boundary..end];
-    if span.is_empty() {
+    let middle = layout.compactable_messages();
+    if middle.is_empty() {
         return;
     }
 
-    let (sys_prompt, user_prompt) = summ.build_summarization_request(span);
+    // Pass the existing compressed history to the summarizer for merging.
+    if let Some(existing) = layout.compressed_history() {
+        summ.summary = Some(existing.to_string());
+    }
+
+    let (sys_prompt, user_prompt) = summ.build_summarization_request(middle);
     let summary_model = summ.summary_model(model_for_round).to_string();
 
     let summary_request = ChatRequest {
@@ -727,33 +779,43 @@ async fn summarize_if_needed(
         ..Default::default()
     };
 
+    // Record the middle zone size before compaction for tool_metas reindexing.
+    let middle_len = layout.middle_len();
+    let prefix_and_history_len = layout.to_messages().len()
+        - layout.middle_len()
+        - layout.recency_window_len();
+
     match client.chat(&summary_request).await {
         Ok(completion) => {
             if let Some(ref summary_text) = completion.content {
-                let summary_msg = Message::user(format!(
-                    "<context_summary>\n{summary_text}\n</context_summary>"
-                ));
-                let ack_msg = Message::assistant_text(
-                    "I've reviewed the context summary and will continue from where I left off.",
-                );
+                // Use layout's compaction API — this clears the middle zone and
+                // sets the compressed history. The summarizer already merged the
+                // existing summary into the new one.
+                let current_round = summ.boundary_index; // approximate
+                layout.apply_compaction(summary_text.clone(), current_round);
+                summ.apply_summary(summary_text.clone(), 0);
 
-                let drain_range = boundary..end;
-                messages.drain(drain_range);
-                messages.insert(boundary, ack_msg);
-                messages.insert(boundary, summary_msg);
-
-                summ.apply_summary(summary_text.clone(), boundary + 2);
-
-                let compaction_number = summ.boundary_index; // proxy
+                let compaction_number = layout.compaction_count();
                 event_handler.on_event(&HarnessEvent::Compaction { compaction_number });
 
-                // Reindex tool_metas after message removal.
-                tool_metas.retain(|m| m.message_index < boundary || m.message_index >= end);
-                let removed = end - boundary;
-                let inserted = 2;
+                // Invalidate tool_metas that were in the compacted middle zone
+                // and reindex remaining ones.
+                let middle_start = prefix_and_history_len;
+                let middle_end = middle_start + middle_len;
+                tool_metas.retain(|m| {
+                    m.message_index < middle_start || m.message_index >= middle_end
+                });
+                // After compaction, the middle is gone and compressed_history now
+                // takes 2 message slots. Adjust indices for messages that were
+                // after the old middle zone.
+                let new_history_slots = 2;
+                let old_history_slots =
+                    if layout.compaction_count() > 1 { 2 } else { 0 };
+                let shift = middle_len + old_history_slots;
                 for meta in tool_metas.iter_mut() {
-                    if meta.message_index >= end {
-                        meta.message_index = meta.message_index.saturating_sub(removed) + inserted;
+                    if meta.message_index >= middle_end {
+                        meta.message_index =
+                            meta.message_index.saturating_sub(shift) + new_history_slots;
                     }
                 }
             }
@@ -777,7 +839,7 @@ async fn handle_plan_submission(
     config: &HarnessConfig,
     tools: &ToolSet,
     completion: &crate::ChatCompletion,
-    messages: &mut Vec<Message>,
+    layout: &mut ContextLayout,
     rounds_used: u32,
     event_handler: &dyn EventHandler,
 ) -> Option<PlanTransition> {
@@ -793,11 +855,11 @@ async fn handle_plan_submission(
             .and_then(|v| v.get("summary").and_then(|s| s.as_str()).map(String::from))
             .unwrap_or_else(|| plan_summary.clone());
 
-        messages.push(Message::assistant_tool_calls(completion.tool_calls.clone()));
+        layout.push_message(Message::assistant_tool_calls(completion.tool_calls.clone()));
 
         for call in &completion.tool_calls {
             if PlanExecuteConfig::is_plan_submission(&call.function.name) {
-                messages.push(Message::tool_result(
+                layout.push_message(Message::tool_result(
                     &call.id,
                     format!(
                         "Plan accepted. Transitioning to execution phase.\n\nPlan summary: {summary_text}"
@@ -807,7 +869,7 @@ async fn handle_plan_submission(
                 let result = tools
                     .execute(&call.function.name, &call.function.arguments)
                     .await;
-                messages.push(Message::tool_result(&call.id, result));
+                layout.push_message(Message::tool_result(&call.id, result));
             }
         }
 
@@ -819,7 +881,7 @@ async fn handle_plan_submission(
             to: &Phase::Executing,
         });
 
-        messages.push(Message::user(&config.plan_execute.config.execution_prompt));
+        layout.push_message(Message::user(&config.plan_execute.config.execution_prompt));
 
         return Some(PlanTransition {
             should_continue: true,
@@ -836,7 +898,7 @@ async fn handle_plan_submission(
             from: &Phase::Planning,
             to: &Phase::Executing,
         });
-        messages.push(Message::user(&config.plan_execute.config.execution_prompt));
+        layout.push_message(Message::user(&config.plan_execute.config.execution_prompt));
         return Some(PlanTransition {
             should_continue: false,
         });
@@ -961,6 +1023,7 @@ mod tests {
             round: 1,
             max_rounds: 10,
             context_usage: &usage,
+            context_breakdown: None,
         });
         handler.on_event(&HarnessEvent::Finished);
     }
@@ -977,6 +1040,7 @@ mod tests {
             round: 1,
             max_rounds: 10,
             context_usage: &usage,
+            context_breakdown: None,
         });
         handler.on_event(&HarnessEvent::Text("hello"));
         handler.on_event(&HarnessEvent::Finished);

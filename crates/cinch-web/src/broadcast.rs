@@ -151,6 +151,7 @@ impl EventHandler for WebBroadcastHandler {
                 round,
                 max_rounds,
                 context_usage,
+                ..
             } => {
                 self.broadcast(WsMessage::Round {
                     round: *round,

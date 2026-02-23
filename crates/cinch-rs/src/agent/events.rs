@@ -19,7 +19,7 @@
 
 use crate::Message;
 use crate::agent::plan_execute::Phase;
-use crate::context::ContextUsage;
+use crate::context::{ContextBreakdown, ContextUsage};
 use tracing::{debug, info, trace, warn};
 
 // ── Events ─────────────────────────────────────────────────────────
@@ -35,6 +35,8 @@ pub enum HarnessEvent<'a> {
         round: u32,
         max_rounds: u32,
         context_usage: &'a ContextUsage,
+        /// Per-zone context breakdown (available when ContextLayout is active).
+        context_breakdown: Option<&'a ContextBreakdown>,
     },
     /// The LLM returned a text response (may be alongside tool calls).
     Text(&'a str),
@@ -513,6 +515,7 @@ impl EventHandler for LoggingHandler {
                 round,
                 max_rounds,
                 context_usage,
+                context_breakdown,
             } => {
                 info!(
                     "[round {}/{}] {}",
@@ -520,6 +523,15 @@ impl EventHandler for LoggingHandler {
                     max_rounds,
                     context_usage.to_log_string()
                 );
+                if let Some(bd) = context_breakdown {
+                    debug!(
+                        "  zones: prefix={}t, history={}t, middle={}t, recency={}t",
+                        bd.prefix_tokens,
+                        bd.compressed_history_tokens,
+                        bd.middle_tokens,
+                        bd.recency_tokens,
+                    );
+                }
             }
             HarnessEvent::Text(text) => {
                 let preview: String = text.chars().take(200).collect();

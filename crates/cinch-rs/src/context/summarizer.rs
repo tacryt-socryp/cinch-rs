@@ -21,7 +21,9 @@ Rules:
 - Only include facts explicitly stated in the messages. Do not infer or extrapolate.
 - Preserve file paths, function names, and error messages verbatim.
 - Be concise — every token must earn its place.
-- If there is an existing summary, merge the new information into it coherently.";
+- If there is an existing summary, merge the new information into it to produce a single \
+  cohesive summary. Do not simply append — integrate, deduplicate, and update. The result \
+  must be a standalone summary that replaces the existing one entirely.";
 
 /// Configuration for incremental summarization.
 #[derive(Debug, Clone)]

@@ -46,6 +46,7 @@ impl EventHandler for UiEventHandler {
                 round,
                 max_rounds,
                 context_usage,
+                ..
             } => {
                 update_round(&self.state, *round, *max_rounds, context_usage.usage_pct);
             }
@@ -113,6 +114,7 @@ mod tests {
             round: 3,
             max_rounds: 20,
             context_usage: &usage,
+            context_breakdown: None,
         });
         {
             let s = state.lock().unwrap();
