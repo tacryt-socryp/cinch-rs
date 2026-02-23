@@ -17,8 +17,11 @@ use crate::tools::core::{Tool, ToolFuture, ToolSet};
 use crate::{Message, OpenRouterClient, ToolDef};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 /// Budget semaphore for tree-wide token accounting.
@@ -303,6 +306,94 @@ fn plan_execute_read_only(max_rounds: u32) -> crate::agent::config::HarnessPlanE
     }
 }
 
+// ── Shared config resolution ────────────────────────────────────────
+
+/// Resolved sub-agent configuration derived from `DelegateSubAgentArgs`.
+struct ResolvedConfig {
+    model: String,
+    max_rounds: u32,
+    plan_execute: crate::agent::config::HarnessPlanExecuteConfig,
+    system_prompt: String,
+}
+
+/// Map `DelegateSubAgentArgs` + parent model into concrete config values.
+fn resolve_config(args: &DelegateSubAgentArgs, parent_model: &str) -> ResolvedConfig {
+    match args.agent_type {
+        SubAgentType::Explore => {
+            let default_rounds = match args.thoroughness {
+                Thoroughness::Quick => 5,
+                Thoroughness::Medium => 10,
+                Thoroughness::Thorough => 20,
+            };
+            let rounds = args.max_rounds.unwrap_or(default_rounds);
+            ResolvedConfig {
+                model: args.model.clone().unwrap_or_else(|| parent_model.into()),
+                max_rounds: rounds,
+                plan_execute: plan_execute_read_only(rounds),
+                system_prompt: explore_system_prompt(&args.name),
+            }
+        }
+        SubAgentType::Worker => {
+            let rounds = args.max_rounds.unwrap_or(10);
+            let pe = match args.plan {
+                Some(true) => crate::agent::config::HarnessPlanExecuteConfig::default(),
+                _ => crate::agent::config::HarnessPlanExecuteConfig::disabled(),
+            };
+            ResolvedConfig {
+                model: args.model.clone().unwrap_or_else(|| parent_model.into()),
+                max_rounds: rounds,
+                plan_execute: pe,
+                system_prompt: worker_system_prompt(&args.name),
+            }
+        }
+        SubAgentType::Planner => {
+            let rounds = args.max_rounds.unwrap_or(10);
+            ResolvedConfig {
+                model: args.model.clone().unwrap_or_else(|| parent_model.into()),
+                max_rounds: rounds,
+                plan_execute: plan_execute_read_only(rounds),
+                system_prompt: planner_system_prompt(&args.name),
+            }
+        }
+    }
+}
+
+/// Build the `HarnessConfig` for a child agent from resolved settings.
+fn build_child_harness_config(resolved: ResolvedConfig) -> (HarnessConfig, String) {
+    let system_prompt = resolved.system_prompt;
+    let config = HarnessConfig {
+        model: resolved.model,
+        max_rounds: resolved.max_rounds,
+        max_tokens: 4096,
+        temperature: 0.7,
+        checkpoint: crate::agent::config::HarnessCheckpointConfig::disabled(),
+        memory_prompt: None,
+        plan_execute: resolved.plan_execute,
+        ..Default::default()
+    };
+    (config, system_prompt)
+}
+
+/// Build child messages with system prompt (+ optional parent context) and task.
+fn build_child_messages(system_prompt: String, context: Option<&str>, task: String) -> Vec<Message> {
+    let prompt = match context {
+        Some(ctx) => format!("{system_prompt}\n\nContext from parent:\n{ctx}"),
+        None => system_prompt,
+    };
+    vec![Message::system(prompt), Message::user(task)]
+}
+
+/// Truncate output to `max_chars`, appending a notice if truncated.
+fn truncate_output(output: String, max_chars: usize) -> String {
+    if output.len() > max_chars {
+        let mut s: String = output.chars().take(max_chars).collect();
+        s.push_str("\n[output truncated]");
+        s
+    } else {
+        output
+    }
+}
+
 /// A tool that spawns a child harness run for recursive sub-agent delegation.
 ///
 /// When the LLM returns multiple `delegate_sub_agent` calls in a single
@@ -383,7 +474,6 @@ impl Tool for DelegateSubAgentTool {
                 }
             };
 
-            // Check depth limit.
             if !shared.can_spawn_child() {
                 return format!(
                     "Error: maximum sub-agent depth ({}) reached. Cannot spawn child agent '{}'.",
@@ -391,7 +481,6 @@ impl Tool for DelegateSubAgentTool {
                 );
             }
 
-            // Acquire concurrency permit — blocks if too many children are running.
             let _permit = match concurrency.acquire().await {
                 Ok(p) => p,
                 Err(_) => {
@@ -402,7 +491,6 @@ impl Tool for DelegateSubAgentTool {
                 }
             };
 
-            // Create child shared resources with incremented depth.
             let child_shared = match shared.child() {
                 Some(s) => s,
                 None => {
@@ -413,90 +501,24 @@ impl Tool for DelegateSubAgentTool {
                 }
             };
 
-            // Resolve type-based defaults, then apply explicit overrides.
-            let (child_model, max_rounds, plan_execute, base_system_prompt) =
-                match args.agent_type {
-                    SubAgentType::Explore => {
-                        let default_rounds = match args.thoroughness {
-                            Thoroughness::Quick => 5,
-                            Thoroughness::Medium => 10,
-                            Thoroughness::Thorough => 20,
-                        };
-                        let rounds = args.max_rounds.unwrap_or(default_rounds);
-                        (
-                            args.model.unwrap_or_else(|| parent_model.clone()),
-                            rounds,
-                            plan_execute_read_only(rounds),
-                            explore_system_prompt(&args.name),
-                        )
-                    }
-                    SubAgentType::Worker => {
-                        let rounds = args.max_rounds.unwrap_or(10);
-                        let pe = match args.plan {
-                            Some(true) => {
-                                crate::agent::config::HarnessPlanExecuteConfig::default()
-                            }
-                            _ => crate::agent::config::HarnessPlanExecuteConfig::disabled(),
-                        };
-                        (
-                            args.model.unwrap_or_else(|| parent_model.clone()),
-                            rounds,
-                            pe,
-                            worker_system_prompt(&args.name),
-                        )
-                    }
-                    SubAgentType::Planner => {
-                        let rounds = args.max_rounds.unwrap_or(10);
-                        (
-                            args.model.unwrap_or_else(|| parent_model.clone()),
-                            rounds,
-                            plan_execute_read_only(rounds),
-                            planner_system_prompt(&args.name),
-                        )
-                    }
-                };
-
+            let resolved = resolve_config(&args, &parent_model);
             info!(
                 "Spawning sub-agent '{}' (type={:?}, depth={}, model={}, max_rounds={})",
-                args.name, args.agent_type, child_shared.depth, child_model, max_rounds
+                args.name, args.agent_type, child_shared.depth, resolved.model, resolved.max_rounds
             );
 
-            let child_config = HarnessConfig {
-                model: child_model,
-                max_rounds,
-                max_tokens: 4096,
-                temperature: 0.7,
-                checkpoint: crate::agent::config::HarnessCheckpointConfig::disabled(),
-                memory_prompt: None, // Sub-agents don't need persistent memory
-                plan_execute,
-                ..Default::default()
-            };
+            let (child_config, system_prompt) = build_child_harness_config(resolved);
+            let child_messages =
+                build_child_messages(system_prompt, args.context.as_deref(), args.task);
 
-            // Child messages: system prompt (with optional parent context) + user task.
-            let system_prompt = if let Some(ref ctx) = args.context {
-                format!("{base_system_prompt}\n\nContext from parent:\n{ctx}")
-            } else {
-                base_system_prompt
-            };
-
-            let child_messages = vec![
-                Message::system(system_prompt),
-                Message::user(args.task),
-            ];
-
-            // Run the child harness.
             let child_harness = Harness::new(&client, &tools, child_config)
                 .with_event_handler(&NoopHandler)
                 .with_shared_resources(child_shared);
 
-            let child_result = child_harness.run(child_messages).await;
-
-            match child_result {
+            match child_harness.run(child_messages).await {
                 Ok(result) => {
                     let tokens_consumed =
                         result.total_prompt_tokens as u64 + result.total_completion_tokens as u64;
-
-                    // Report tokens to the tree-wide budget.
                     shared.budget.acquire(tokens_consumed);
 
                     debug!(
@@ -504,28 +526,369 @@ impl Tool for DelegateSubAgentTool {
                         args.name, result.rounds_used, tokens_consumed, result.finished
                     );
 
-                    // Truncate output to max_result_chars.
-                    let output = result.text();
-                    let truncated = if output.len() > args.max_result_chars {
-                        let mut s: String = output.chars().take(args.max_result_chars).collect();
-                        s.push_str("\n[output truncated]");
-                        s
-                    } else {
-                        output
-                    };
-
-                    let sub_result = SubAgentResult {
+                    let output = truncate_output(result.text(), args.max_result_chars);
+                    SubAgentResult {
                         name: args.name,
-                        output: truncated,
+                        output,
                         finished: result.finished,
                         rounds_used: result.rounds_used,
                         tokens_consumed,
-                    };
-                    sub_result.to_parent_result()
+                    }
+                    .to_parent_result()
                 }
                 Err(e) => {
                     warn!("Sub-agent '{}' failed: {e}", args.name);
                     format!("[Sub-agent '{}' failed] Error: {e}", args.name)
+                }
+            }
+        })
+    }
+}
+
+// ── Background Agent Registry ───────────────────────────────────────
+
+/// Lifecycle state of a background agent.
+enum AgentState {
+    /// The agent's Tokio task is running (or queued for a concurrency permit).
+    Running(JoinHandle<Result<SubAgentResult, String>>),
+    /// The result has already been collected by `check_agent`.
+    Collected,
+}
+
+/// Metadata + handle for one background agent.
+struct RegistryEntry {
+    name: String,
+    state: AgentState,
+    started_at: Instant,
+}
+
+/// Thread-safe registry for background sub-agents.
+///
+/// Stores spawned Tokio task handles keyed by a monotonic ID (`bg-1`, `bg-2`,
+/// ...). The [`SpawnBackgroundAgentTool`] inserts entries and the
+/// [`CheckAgentTool`] extracts results.
+///
+/// On drop, all still-running tasks are aborted to prevent resource leaks.
+pub struct BackgroundAgentRegistry {
+    entries: std::sync::Mutex<HashMap<String, RegistryEntry>>,
+    next_id: AtomicU64,
+}
+
+impl Default for BackgroundAgentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BackgroundAgentRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Register a newly-spawned background agent. Returns the assigned ID.
+    fn register(
+        &self,
+        name: String,
+        handle: JoinHandle<Result<SubAgentResult, String>>,
+    ) -> String {
+        let id = format!("bg-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.entries.lock().unwrap().insert(
+            id.clone(),
+            RegistryEntry {
+                name,
+                state: AgentState::Running(handle),
+                started_at: Instant::now(),
+            },
+        );
+        id
+    }
+
+    /// Format a status summary of all tracked agents.
+    fn status_summary(&self) -> String {
+        let entries = self.entries.lock().unwrap();
+        if entries.is_empty() {
+            return "No background agents.".into();
+        }
+        let mut lines = Vec::with_capacity(entries.len());
+        for (id, entry) in entries.iter() {
+            let status = match &entry.state {
+                AgentState::Running(h) if h.is_finished() => "finished (uncollected)",
+                AgentState::Running(_) => "running",
+                AgentState::Collected => "collected",
+            };
+            let elapsed = entry.started_at.elapsed().as_secs_f64();
+            lines.push(format!(
+                "  {id}: '{}' — {status} ({elapsed:.1}s)",
+                entry.name
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Drop for BackgroundAgentRegistry {
+    fn drop(&mut self) {
+        for (_, entry) in self.entries.get_mut().unwrap().drain() {
+            if let AgentState::Running(handle) = entry.state {
+                handle.abort();
+            }
+        }
+    }
+}
+
+// ── SpawnBackgroundAgentTool ────────────────────────────────────────
+
+/// Tool that spawns a sub-agent as a background Tokio task and returns
+/// immediately with an ID. The LLM can continue working and later call
+/// `check_agent` to collect the result.
+pub struct SpawnBackgroundAgentTool {
+    shared: SharedResources,
+    client: Arc<OpenRouterClient>,
+    tools: Arc<ToolSet>,
+    parent_model: String,
+    registry: Arc<BackgroundAgentRegistry>,
+    concurrency: Arc<tokio::sync::Semaphore>,
+}
+
+impl SpawnBackgroundAgentTool {
+    pub fn new(
+        shared: SharedResources,
+        client: Arc<OpenRouterClient>,
+        tools: Arc<ToolSet>,
+        parent_model: String,
+        registry: Arc<BackgroundAgentRegistry>,
+    ) -> Self {
+        Self {
+            shared,
+            client,
+            tools,
+            parent_model,
+            registry,
+            concurrency: Arc::new(tokio::sync::Semaphore::new(5)),
+        }
+    }
+}
+
+impl Tool for SpawnBackgroundAgentTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef::new(
+            "spawn_background_agent",
+            "Spawn a sub-agent as a background task and return immediately with an agent ID. \
+             The agent runs concurrently while you continue working. Use check_agent with the \
+             returned ID to poll status or collect the result. Accepts the same arguments as \
+             delegate_sub_agent (name, task, agent_type, thoroughness, etc.).",
+            crate::json_schema_for::<DelegateSubAgentArgs>(),
+        )
+    }
+
+    fn execute(&self, arguments: &str) -> ToolFuture<'_> {
+        // Clone all Arc/owned data into the future — the future itself is
+        // short-lived (returns the ID), but the spawned task lives longer.
+        let arguments = arguments.to_string();
+        let shared = self.shared.clone();
+        let client = Arc::clone(&self.client);
+        let tools = Arc::clone(&self.tools);
+        let parent_model = self.parent_model.clone();
+        let registry = Arc::clone(&self.registry);
+        let concurrency = Arc::clone(&self.concurrency);
+
+        Box::pin(async move {
+            let args: DelegateSubAgentArgs = match serde_json::from_str(&arguments) {
+                Ok(a) => a,
+                Err(e) => {
+                    return format!(
+                        "Error: invalid arguments for spawn_background_agent: {e}. \
+                         Required: name (string), task (string)."
+                    );
+                }
+            };
+
+            if !shared.can_spawn_child() {
+                return format!(
+                    "Error: maximum sub-agent depth ({}) reached. Cannot spawn '{}'.",
+                    shared.max_depth, args.name
+                );
+            }
+
+            let child_shared = match shared.child() {
+                Some(s) => s,
+                None => {
+                    return format!(
+                        "Error: cannot create child resources for '{}'. Depth limit reached.",
+                        args.name
+                    );
+                }
+            };
+
+            let resolved = resolve_config(&args, &parent_model);
+            let agent_name = args.name.clone();
+            let max_result_chars = args.max_result_chars;
+
+            info!(
+                "Spawning background agent '{}' (type={:?}, model={}, max_rounds={})",
+                args.name, args.agent_type, resolved.model, resolved.max_rounds
+            );
+
+            let (child_config, system_prompt) = build_child_harness_config(resolved);
+            let child_messages =
+                build_child_messages(system_prompt, args.context.as_deref(), args.task);
+
+            // Spawn the agent as an independent Tokio task. The concurrency
+            // permit is acquired *inside* the task so spawn returns immediately
+            // even if all slots are busy — the task queues until a slot opens.
+            let budget = Arc::clone(&shared.budget);
+            let task_name = agent_name.clone();
+            let handle = tokio::spawn(async move {
+                let _permit = concurrency
+                    .acquire()
+                    .await
+                    .map_err(|_| format!("concurrency semaphore closed for '{task_name}'"))?;
+
+                let handler = NoopHandler;
+                let child_harness = Harness::new(&client, &tools, child_config)
+                    .with_event_handler(&handler)
+                    .with_shared_resources(child_shared);
+
+                let result = child_harness
+                    .run(child_messages)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let tokens_consumed =
+                    result.total_prompt_tokens as u64 + result.total_completion_tokens as u64;
+                budget.acquire(tokens_consumed);
+
+                let output = truncate_output(result.text(), max_result_chars);
+                Ok(SubAgentResult {
+                    name: task_name,
+                    output,
+                    finished: result.finished,
+                    rounds_used: result.rounds_used,
+                    tokens_consumed,
+                })
+            });
+
+            let agent_id = registry.register(agent_name.clone(), handle);
+            format!(
+                "Background agent '{agent_name}' spawned with ID '{agent_id}'. \
+                 Use check_agent to collect the result when ready."
+            )
+        })
+    }
+}
+
+// ── CheckAgentTool ──────────────────────────────────────────────────
+
+/// Arguments for the `check_agent` tool.
+#[derive(Deserialize, JsonSchema, Debug)]
+pub struct CheckAgentArgs {
+    /// The agent ID returned by `spawn_background_agent` (e.g. "bg-1").
+    pub agent_id: String,
+    /// If true (default), block until the agent finishes. If false, return
+    /// immediately with the current status.
+    #[serde(default = "default_true")]
+    pub block: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Tool that checks on or collects the result of a background sub-agent.
+pub struct CheckAgentTool {
+    registry: Arc<BackgroundAgentRegistry>,
+}
+
+impl CheckAgentTool {
+    pub fn new(registry: Arc<BackgroundAgentRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+impl Tool for CheckAgentTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef::new(
+            "check_agent",
+            "Check the status of a background agent or collect its result. \
+             With block=true (default), waits for the agent to finish and returns \
+             the result. With block=false, returns immediately with the current status. \
+             Pass agent_id=\"*\" to see a summary of all background agents.",
+            crate::json_schema_for::<CheckAgentArgs>(),
+        )
+    }
+
+    fn execute(&self, arguments: &str) -> ToolFuture<'_> {
+        let arguments = arguments.to_string();
+        let registry = Arc::clone(&self.registry);
+
+        Box::pin(async move {
+            let args: CheckAgentArgs = match serde_json::from_str(&arguments) {
+                Ok(a) => a,
+                Err(e) => {
+                    return format!(
+                        "Error: invalid arguments for check_agent: {e}. \
+                         Required: agent_id (string). Optional: block (bool, default true)."
+                    );
+                }
+            };
+
+            // Wildcard: list all agents.
+            if args.agent_id == "*" {
+                return registry.status_summary();
+            }
+
+            // Extract the JoinHandle from the registry (lock held briefly).
+            let handle = {
+                let mut entries = registry.entries.lock().unwrap();
+                let entry = match entries.get_mut(&args.agent_id) {
+                    Some(e) => e,
+                    None => {
+                        return format!(
+                            "Error: unknown agent ID '{}'. Use agent_id=\"*\" to list all agents.",
+                            args.agent_id
+                        );
+                    }
+                };
+
+                match &entry.state {
+                    AgentState::Collected => {
+                        return format!(
+                            "Agent '{}' (id: {}) result was already collected.",
+                            entry.name, args.agent_id
+                        );
+                    }
+                    AgentState::Running(h) => {
+                        if !h.is_finished() && !args.block {
+                            let elapsed = entry.started_at.elapsed().as_secs_f64();
+                            return format!(
+                                "Agent '{}' (id: {}) is still running ({elapsed:.1}s elapsed).",
+                                entry.name, args.agent_id
+                            );
+                        }
+                        // Take the handle, transition to Collected.
+                        match std::mem::replace(&mut entry.state, AgentState::Collected) {
+                            AgentState::Running(h) => h,
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            };
+            // Lock released — safe to await.
+
+            match handle.await {
+                Ok(Ok(result)) => {
+                    debug!(
+                        "Background agent '{}' collected: rounds={}, tokens={}",
+                        result.name, result.rounds_used, result.tokens_consumed
+                    );
+                    result.to_parent_result()
+                }
+                Ok(Err(e)) => format!("[Background agent '{}' failed] Error: {e}", args.agent_id),
+                Err(join_err) => {
+                    format!("[Background agent '{}' panicked] Error: {join_err}", args.agent_id)
                 }
             }
         })
@@ -709,5 +1072,197 @@ mod tests {
         assert_eq!(pe.config.max_planning_rounds, 15);
     }
 
+    // ── resolve_config tests ────────────────────────────────────────
 
+    #[test]
+    fn resolve_config_explore_quick() {
+        let args: DelegateSubAgentArgs = serde_json::from_str(
+            r#"{"name":"x","task":"t","agent_type":"explore","thoroughness":"quick"}"#,
+        )
+        .unwrap();
+        let rc = resolve_config(&args, "parent-model");
+        assert_eq!(rc.model, "parent-model");
+        assert_eq!(rc.max_rounds, 5);
+        assert!(rc.plan_execute.enabled);
+        assert!(rc.system_prompt.contains("exploration"));
+    }
+
+    #[test]
+    fn resolve_config_explore_thorough() {
+        let args: DelegateSubAgentArgs = serde_json::from_str(
+            r#"{"name":"x","task":"t","agent_type":"explore","thoroughness":"thorough"}"#,
+        )
+        .unwrap();
+        let rc = resolve_config(&args, "m");
+        assert_eq!(rc.max_rounds, 20);
+    }
+
+    #[test]
+    fn resolve_config_worker_defaults() {
+        let args: DelegateSubAgentArgs =
+            serde_json::from_str(r#"{"name":"w","task":"t"}"#).unwrap();
+        let rc = resolve_config(&args, "pm");
+        assert_eq!(rc.max_rounds, 10);
+        assert!(!rc.plan_execute.enabled);
+    }
+
+    #[test]
+    fn resolve_config_worker_with_plan() {
+        let args: DelegateSubAgentArgs =
+            serde_json::from_str(r#"{"name":"w","task":"t","plan":true}"#).unwrap();
+        let rc = resolve_config(&args, "pm");
+        assert!(rc.plan_execute.enabled);
+    }
+
+    #[test]
+    fn resolve_config_planner() {
+        let args: DelegateSubAgentArgs =
+            serde_json::from_str(r#"{"name":"p","task":"t","agent_type":"planner"}"#).unwrap();
+        let rc = resolve_config(&args, "pm");
+        assert!(rc.plan_execute.enabled);
+        assert!(rc.system_prompt.contains("planning"));
+    }
+
+    #[test]
+    fn resolve_config_model_override() {
+        let args: DelegateSubAgentArgs =
+            serde_json::from_str(r#"{"name":"x","task":"t","model":"custom/m"}"#).unwrap();
+        let rc = resolve_config(&args, "parent");
+        assert_eq!(rc.model, "custom/m");
+    }
+
+    #[test]
+    fn resolve_config_max_rounds_override() {
+        let args: DelegateSubAgentArgs = serde_json::from_str(
+            r#"{"name":"x","task":"t","agent_type":"explore","thoroughness":"quick","max_rounds":99}"#,
+        )
+        .unwrap();
+        let rc = resolve_config(&args, "m");
+        assert_eq!(rc.max_rounds, 99); // Override beats thoroughness default of 5
+    }
+
+    // ── Helper function tests ───────────────────────────────────────
+
+    #[test]
+    fn build_child_messages_without_context() {
+        let msgs = build_child_messages("sys".into(), None, "do it".into());
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn build_child_messages_with_context() {
+        let msgs = build_child_messages("sys".into(), Some("ctx"), "do it".into());
+        assert_eq!(msgs.len(), 2);
+        let sys_content = msgs[0].content.as_deref().unwrap();
+        assert!(sys_content.contains("Context from parent:\nctx"));
+    }
+
+    #[test]
+    fn truncate_output_short() {
+        let s = truncate_output("hello".into(), 100);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn truncate_output_long() {
+        let s = truncate_output("abcdef".into(), 3);
+        assert!(s.starts_with("abc"));
+        assert!(s.contains("[output truncated]"));
+    }
+
+    // ── Background agent registry tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn registry_ids_are_monotonic() {
+        let reg = BackgroundAgentRegistry::new();
+        let h1 = tokio::spawn(async { Ok::<_, String>(SubAgentResult {
+            name: "a".into(),
+            output: String::new(),
+            finished: true,
+            rounds_used: 0,
+            tokens_consumed: 0,
+        }) });
+        let h2 = tokio::spawn(async { Ok::<_, String>(SubAgentResult {
+            name: "b".into(),
+            output: String::new(),
+            finished: true,
+            rounds_used: 0,
+            tokens_consumed: 0,
+        }) });
+        let id1 = reg.register("a".into(), h1);
+        let id2 = reg.register("b".into(), h2);
+        assert_eq!(id1, "bg-1");
+        assert_eq!(id2, "bg-2");
+    }
+
+    #[test]
+    fn registry_status_summary_empty() {
+        let reg = BackgroundAgentRegistry::new();
+        assert_eq!(reg.status_summary(), "No background agents.");
+    }
+
+    #[tokio::test]
+    async fn registry_drop_aborts_running_tasks() {
+        let handle = tokio::spawn(async {
+            // Long-running task that should be aborted.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            Ok::<_, String>(SubAgentResult {
+                name: "slow".into(),
+                output: String::new(),
+                finished: false,
+                rounds_used: 0,
+                tokens_consumed: 0,
+            })
+        });
+        let reg = BackgroundAgentRegistry::new();
+        let _id = reg.register("slow".into(), handle);
+        drop(reg); // Should abort the task without hanging.
+    }
+
+    #[test]
+    fn check_agent_args_defaults() {
+        let args: CheckAgentArgs =
+            serde_json::from_str(r#"{"agent_id": "bg-1"}"#).unwrap();
+        assert_eq!(args.agent_id, "bg-1");
+        assert!(args.block); // default true
+    }
+
+    #[test]
+    fn check_agent_args_non_blocking() {
+        let args: CheckAgentArgs =
+            serde_json::from_str(r#"{"agent_id": "bg-1", "block": false}"#).unwrap();
+        assert!(!args.block);
+    }
+
+    #[tokio::test]
+    async fn registry_collect_completed_task() {
+        let reg = BackgroundAgentRegistry::new();
+        let handle = tokio::spawn(async {
+            Ok::<_, String>(SubAgentResult {
+                name: "fast".into(),
+                output: "done".into(),
+                finished: true,
+                rounds_used: 1,
+                tokens_consumed: 100,
+            })
+        });
+        let id = reg.register("fast".into(), handle);
+
+        // Wait briefly for the task to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Extract handle and collect.
+        let handle = {
+            let mut entries = reg.entries.lock().unwrap();
+            let entry = entries.get_mut(&id).unwrap();
+            match std::mem::replace(&mut entry.state, AgentState::Collected) {
+                AgentState::Running(h) => h,
+                _ => panic!("expected Running"),
+            }
+        };
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.name, "fast");
+        assert_eq!(result.output, "done");
+        assert!(result.finished);
+    }
 }
