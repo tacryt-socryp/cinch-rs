@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+/* ── Light theme (default) ──────────────────────────────────────────── */
+
+:root {
+  /* Font stacks */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --bg-base:      oklch(0.99 0.002 260);
+  --bg-surface:   oklch(0.96 0.003 260);
+  --bg-overlay:   oklch(0.93 0.003 260);
+  --bg-subtle:    oklch(0.90 0.004 260);
+  --border-dim:   oklch(0.88 0.004 260);
+  --border:       oklch(0.82 0.006 260);
+
+  --text-primary:    oklch(0.15 0.005 260);
+  --text-secondary:  oklch(0.40 0.005 260);
+  --text-muted:      oklch(0.60 0.008 260);
+
+  --accent:       oklch(0.55 0.22 250);
+  --accent-glow:  oklch(0.55 0.22 250 / 0.12);
+  --success:      oklch(0.55 0.18 155);
+  --error:        oklch(0.55 0.22 25);
+  --warning:      oklch(0.60 0.16 85);
+
+  --shadow-msg: oklch(0 0 0 / 0.08);
+
+  /* Animation tokens */
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration-normal: 200ms;
+  --duration-slow: 350ms;
+}
+
+/* ── Dark theme ─────────────────────────────────────────────────────── */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-base:      oklch(0.13 0.005 260);
+    --bg-surface:   oklch(0.16 0.005 260);
+    --bg-overlay:   oklch(0.19 0.005 260);
+    --bg-subtle:    oklch(0.22 0.005 260);
+    --border-dim:   oklch(0.25 0.005 260);
+    --border:       oklch(0.30 0.008 260);
+
+    --text-primary:    oklch(0.93 0.005 260);
+    --text-secondary:  oklch(0.68 0.005 260);
+    --text-muted:      oklch(0.50 0.008 260);
+
+    --accent:       oklch(0.65 0.20 250);
+    --accent-glow:  oklch(0.65 0.20 250 / 0.15);
+    --success:      oklch(0.70 0.18 155);
+    --error:        oklch(0.65 0.22 25);
+    --warning:      oklch(0.78 0.16 85);
+
+    --shadow-msg: oklch(0 0 0 / 0.3);
+  }
+}
+
+/* ── Body ───────────────────────────────────────────────────────────── */
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Selection ──────────────────────────────────────────────────────── */
+
+::selection {
+  background: oklch(0.55 0.22 250 / 0.30);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-dim);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ── Animations ─────────────────────────────────────────────────────── */
+
+@keyframes dot-pulse {
+  0%, 80%, 100% { opacity: 0.2; }
+  40% { opacity: 1; }
+}
+
+.streaming-dots span {
+  animation: dot-pulse 1.4s ease-in-out infinite;
+  margin-left: 1px;
+}
+
+.streaming-dots span:nth-child(2) { animation-delay: 0.2s; }
+.streaming-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-bar {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes message-appear {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message-appear {
+  animation: message-appear var(--duration-normal) var(--ease-out) both;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-left-color: var(--accent); }
+  50% { border-left-color: transparent; }
+}
+
+@keyframes toast-enter {
+  from { transform: translateX(calc(100% + 1rem)); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes toast-exit {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(calc(100% + 1rem)); opacity: 0; }
+}
+
+/* ── Reduced motion ─────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0s !important;
+    transition-duration: 0s !important;
+  }
+}

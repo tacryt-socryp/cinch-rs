@@ -1,0 +1,20 @@
+[package]
+name = "cinch-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Browser-based chat UI for cinch-rs powered agents"
+
+[dependencies]
+cinch-rs = { path = "../cinch-rs" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3.31"
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13", features = ["json"] }

@@ -1,0 +1,26 @@
+[package]
+name = "cinch-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Opinionated Rust agent framework — library and CLI"
+
+[[bin]]
+name = "cinch"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+chrono = "0.4"
+jsonschema = "0.41.0"
+futures = "0.3.31"
+
+[dev-dependencies]
+tempfile = "3"

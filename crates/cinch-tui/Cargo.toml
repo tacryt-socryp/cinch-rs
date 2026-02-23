@@ -1,0 +1,12 @@
+[package]
+name = "cinch-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Generic terminal UI for cinch-rs powered agents"
+
+[dependencies]
+cinch-rs = { path = "../cinch-rs" }
+ratatui = "0.29"
+crossterm = "0.29"
+serde_json = "1"

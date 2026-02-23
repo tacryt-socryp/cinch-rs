@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/cinch-rs", "crates/cinch-tui", "crates/cinch-web"]
+resolver = "3"
