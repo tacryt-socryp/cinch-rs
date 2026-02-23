@@ -29,13 +29,12 @@
 //! ```ignore
 //! let config = HarnessConfig {
 //!     plan_execute: HarnessPlanExecuteConfig::disabled(),
-//!     checkpoint: HarnessCheckpointConfig::disabled(),
+//!     session: HarnessSessionConfig::disabled(),
 //!     ..HarnessConfig::new("anthropic/claude-sonnet-4", "You are helpful.")
 //! };
 //! ```
 
 use crate::ReasoningConfig;
-use crate::agent::checkpoint::CheckpointConfig;
 use crate::agent::plan_execute::PlanExecuteConfig;
 use crate::agent::project_instructions::ProjectInstructions;
 use crate::api::retry::RetryConfig;
@@ -87,31 +86,39 @@ pub type HarnessSummarizerConfig = Toggle<SummarizerConfig>;
 /// Plan-execute workflow configuration.
 pub type HarnessPlanExecuteConfig = Toggle<PlanExecuteConfig>;
 
-// ── Checkpoint config (non-Default inner type) ────────────────────
+// ── Session config ─────────────────────────────────────────────────
 
-/// Configuration for checkpointing within the harness.
+/// Configuration for per-session directories with manifests.
+///
+/// Each session gets its own directory under `sessions_dir`, containing
+/// a `manifest.json` and per-round checkpoint files.
 #[derive(Debug, Clone)]
-pub struct HarnessCheckpointConfig {
-    /// Whether checkpointing is enabled.
+pub struct HarnessSessionConfig {
+    /// Whether session management is enabled.
     pub enabled: bool,
-    /// Checkpoint directory and settings.
-    pub config: Option<CheckpointConfig>,
+    /// Root directory for session directories. Default: `.agents/sessions`.
+    pub sessions_dir: PathBuf,
+    /// Whether to delete round checkpoint files on successful completion,
+    /// keeping only the manifest. Default: `true`.
+    pub cleanup_on_success: bool,
 }
 
-impl Default for HarnessCheckpointConfig {
+impl Default for HarnessSessionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            config: Some(CheckpointConfig::new(".agent-checkpoints")),
+            sessions_dir: PathBuf::from(".agents/sessions"),
+            cleanup_on_success: true,
         }
     }
 }
 
-impl HarnessCheckpointConfig {
+impl HarnessSessionConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            config: None,
+            sessions_dir: PathBuf::from(".agents/sessions"),
+            cleanup_on_success: true,
         }
     }
 }
@@ -208,7 +215,7 @@ impl Default for MemoryConfig {
 ///   `..Default::default()` or `..HarnessConfig::new(...)`.
 ///
 /// Disabling a module is an explicit override (e.g.
-/// [`HarnessCheckpointConfig::disabled()`]), not the absence of a builder call.
+/// [`HarnessSessionConfig::disabled()`]), not the absence of a builder call.
 #[derive(Debug, Clone)]
 pub struct HarnessConfig {
     /// Model identifier (e.g. `"anthropic/claude-sonnet-4"`).
@@ -233,8 +240,8 @@ pub struct HarnessConfig {
     pub eviction: HarnessEvictionConfig,
     /// Summarizer configuration. Enabled by default.
     pub summarizer: HarnessSummarizerConfig,
-    /// Checkpoint configuration. Enabled by default.
-    pub checkpoint: HarnessCheckpointConfig,
+    /// Session management (per-session directories with manifests). Enabled by default.
+    pub session: HarnessSessionConfig,
     /// Tool result cache configuration. Enabled by default.
     pub cache: HarnessCacheConfig,
     /// Plan-then-execute workflow. Enabled by default. The agent first plans
@@ -455,7 +462,7 @@ impl Default for HarnessConfig {
             routing: RoutingStrategy::default(),
             eviction: HarnessEvictionConfig::default(),
             summarizer: HarnessSummarizerConfig::default(),
-            checkpoint: HarnessCheckpointConfig::default(),
+            session: HarnessSessionConfig::default(),
             cache: HarnessCacheConfig::default(),
             plan_execute: HarnessPlanExecuteConfig::default(),
             streaming: false,

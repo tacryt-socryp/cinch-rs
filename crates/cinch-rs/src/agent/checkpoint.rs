@@ -3,10 +3,13 @@
 //! Serializes harness state to disk after each round, enabling recovery
 //! from crashes or interruptions. On resume, loads the checkpoint and
 //! continues from the last completed round.
+//!
+//! Persistence is handled by [`super::session::SessionManager`]. This module
+//! defines the serializable [`Checkpoint`] struct and the unrelated
+//! [`AdaptiveRoundLimit`].
 
 use crate::Message;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 /// Serializable checkpoint of harness state.
 #[derive(Serialize, Deserialize, Debug)]
@@ -27,113 +30,6 @@ pub struct Checkpoint {
     pub estimated_cost_usd: f64,
     /// Timestamp of the checkpoint.
     pub timestamp: String,
-}
-
-/// Configuration for checkpoint behavior.
-#[derive(Debug, Clone)]
-pub struct CheckpointConfig {
-    /// Directory to store checkpoint files.
-    pub checkpoint_dir: PathBuf,
-    /// Whether to checkpoint after every round.
-    pub checkpoint_every_round: bool,
-    /// Whether to clean up checkpoints on successful completion.
-    pub cleanup_on_success: bool,
-}
-
-impl CheckpointConfig {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self {
-            checkpoint_dir: dir.into(),
-            checkpoint_every_round: true,
-            cleanup_on_success: true,
-        }
-    }
-}
-
-/// Manager for checkpoint operations.
-pub struct CheckpointManager {
-    config: CheckpointConfig,
-}
-
-impl CheckpointManager {
-    pub fn new(config: CheckpointConfig) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&config.checkpoint_dir)?;
-        Ok(Self { config })
-    }
-
-    /// Save a checkpoint to disk.
-    pub fn save(&self, checkpoint: &Checkpoint) -> Result<PathBuf, String> {
-        let filename = format!(
-            "checkpoint-{}-r{}.json",
-            checkpoint.trace_id, checkpoint.round
-        );
-        let path = self.config.checkpoint_dir.join(filename);
-
-        let json = serde_json::to_string_pretty(checkpoint)
-            .map_err(|e| format!("Failed to serialize checkpoint: {e}"))?;
-        std::fs::write(&path, json).map_err(|e| format!("Failed to write checkpoint: {e}"))?;
-
-        Ok(path)
-    }
-
-    /// Load the latest checkpoint for a given trace ID.
-    pub fn load_latest(&self, trace_id: &str) -> Result<Option<Checkpoint>, String> {
-        let mut latest: Option<(u32, PathBuf)> = None;
-
-        let entries = std::fs::read_dir(&self.config.checkpoint_dir)
-            .map_err(|e| format!("Failed to read checkpoint dir: {e}"))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("checkpoint-{trace_id}-r")) && name.ends_with(".json") {
-                // Extract round number.
-                if let Some(round_str) = name
-                    .strip_prefix(&format!("checkpoint-{trace_id}-r"))
-                    .and_then(|s| s.strip_suffix(".json"))
-                    && let Ok(round) = round_str.parse::<u32>()
-                    && latest.as_ref().is_none_or(|(r, _)| round > *r)
-                {
-                    latest = Some((round, entry.path()));
-                }
-            }
-        }
-
-        match latest {
-            Some((_, path)) => {
-                let json = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("Failed to read checkpoint: {e}"))?;
-                let checkpoint: Checkpoint = serde_json::from_str(&json)
-                    .map_err(|e| format!("Failed to parse checkpoint: {e}"))?;
-                Ok(Some(checkpoint))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Clean up all checkpoints for a trace ID.
-    pub fn cleanup(&self, trace_id: &str) -> Result<usize, String> {
-        let mut count = 0;
-        let entries = std::fs::read_dir(&self.config.checkpoint_dir)
-            .map_err(|e| format!("Failed to read checkpoint dir: {e}"))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("checkpoint-{trace_id}")) {
-                std::fs::remove_file(entry.path())
-                    .map_err(|e| format!("Failed to remove checkpoint: {e}"))?;
-                count += 1;
-            }
-        }
-
-        Ok(count)
-    }
-
-    /// Get the checkpoint directory path.
-    pub fn dir(&self) -> &Path {
-        &self.config.checkpoint_dir
-    }
 }
 
 /// Adaptive round limits: dynamically adjust max_rounds based on progress.
@@ -187,76 +83,6 @@ impl AdaptiveRoundLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn checkpoint_save_and_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = CheckpointConfig::new(dir.path());
-        let manager = CheckpointManager::new(config).unwrap();
-
-        let checkpoint = Checkpoint {
-            trace_id: "tr-test".into(),
-            messages: vec![Message::user("hello")],
-            text_output: vec!["world".into()],
-            round: 3,
-            total_prompt_tokens: 100,
-            total_completion_tokens: 50,
-            estimated_cost_usd: 0.001,
-            timestamp: "2026-01-01T00:00:00Z".into(),
-        };
-
-        manager.save(&checkpoint).unwrap();
-        let loaded = manager.load_latest("tr-test").unwrap();
-        assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().round, 3);
-    }
-
-    #[test]
-    fn checkpoint_load_latest_picks_highest_round() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = CheckpointConfig::new(dir.path());
-        let manager = CheckpointManager::new(config).unwrap();
-
-        for round in [1, 5, 3] {
-            let checkpoint = Checkpoint {
-                trace_id: "tr-multi".into(),
-                messages: vec![],
-                text_output: vec![],
-                round,
-                total_prompt_tokens: 0,
-                total_completion_tokens: 0,
-                estimated_cost_usd: 0.0,
-                timestamp: "2026-01-01".into(),
-            };
-            manager.save(&checkpoint).unwrap();
-        }
-
-        let latest = manager.load_latest("tr-multi").unwrap().unwrap();
-        assert_eq!(latest.round, 5);
-    }
-
-    #[test]
-    fn checkpoint_cleanup() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = CheckpointConfig::new(dir.path());
-        let manager = CheckpointManager::new(config).unwrap();
-
-        let checkpoint = Checkpoint {
-            trace_id: "tr-clean".into(),
-            messages: vec![],
-            text_output: vec![],
-            round: 1,
-            total_prompt_tokens: 0,
-            total_completion_tokens: 0,
-            estimated_cost_usd: 0.0,
-            timestamp: "2026-01-01".into(),
-        };
-        manager.save(&checkpoint).unwrap();
-
-        let count = manager.cleanup("tr-clean").unwrap();
-        assert_eq!(count, 1);
-        assert!(manager.load_latest("tr-clean").unwrap().is_none());
-    }
 
     #[test]
     fn adaptive_round_limit() {

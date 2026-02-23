@@ -8,7 +8,8 @@
 //! - [`events`] — [`EventHandler`] trait and [`HarnessEvent`] enum for
 //!   observing the loop. Includes [`LoggingHandler`], [`CompositeEventHandler`],
 //!   [`FnEventHandler`], and [`ToolResultHandler`].
-//! - [`checkpoint`] — save and resume conversation state across sessions.
+//! - [`checkpoint`] — serializable checkpoint struct for round state.
+//! - [`session`] — per-session directories with manifests and checkpoint management.
 //! - [`sub_agent`] — recursive sub-agent delegation with
 //!   [`TokenBudgetSemaphore`] for tree-wide budget control.
 //! - [`plan_execute`] — two-phase workflow: plan with read-only tools first,
@@ -33,6 +34,7 @@ pub mod plan_execute;
 pub mod profile;
 pub mod project_instructions;
 pub mod prompt;
+pub mod session;
 pub mod sub_agent;
 
 // Re-export commonly used items at the module level.

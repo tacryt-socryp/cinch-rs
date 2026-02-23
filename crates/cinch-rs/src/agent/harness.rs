@@ -12,7 +12,7 @@
 use super::config::HarnessConfig;
 use super::events::{EventHandler, EventResponse, HarnessEvent, HarnessResult};
 use super::execution::{execute_and_record_tool_calls, save_round_checkpoint, send_round_request};
-use crate::agent::checkpoint::CheckpointManager;
+use crate::agent::session::{SessionManager, SessionManifest, SessionStatus, epoch_secs, extract_message_preview};
 use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
 use crate::agent::profile::AgentProfile;
 use crate::agent::prompt::reminders::{ReminderRegistry, RoundContext};
@@ -205,6 +205,31 @@ impl<'a> Harness<'a> {
             memory_index_content.as_deref(),
             self.config.project_instructions.as_ref(),
         );
+
+        // ── Create initial session manifest ──
+        if modules.session_manager.is_some() {
+            let now = epoch_secs();
+            let preview = extract_message_preview(&messages);
+            let manifest = SessionManifest {
+                trace_id: acc.trace_id.clone(),
+                title: None,
+                model: self.config.model.clone(),
+                status: SessionStatus::Running,
+                created_at: now,
+                updated_at: now,
+                last_round: 0,
+                total_prompt_tokens: 0,
+                total_completion_tokens: 0,
+                estimated_cost_usd: 0.0,
+                message_preview: preview,
+            };
+            if let Some(ref mgr) = modules.session_manager
+                && let Err(e) = mgr.save_manifest(&manifest)
+            {
+                warn!("Failed to save initial session manifest: {e}");
+            }
+            modules.session_manifest = Some(manifest);
+        }
 
         // Auto-calibrate context budget from the system message if no
         // explicit budget was provided via `with_context_budget()`.
@@ -493,10 +518,10 @@ impl<'a> Harness<'a> {
             )
             .await;
 
-            // ── Save checkpoint ──
+            // ── Save checkpoint + update manifest ──
             let checkpoint_messages = layout.to_messages();
             save_round_checkpoint(
-                &modules.checkpoint_manager,
+                &modules.session_manager,
                 &acc.trace_id,
                 &checkpoint_messages,
                 &acc.text_output,
@@ -506,6 +531,19 @@ impl<'a> Harness<'a> {
                 acc.cost_tracker.estimated_cost_usd,
                 self.event_handler,
             );
+            // Update manifest with latest round/token/cost data.
+            if let Some(ref mut manifest) = modules.session_manifest {
+                manifest.last_round = round + 1;
+                manifest.total_prompt_tokens = acc.total_prompt_tokens;
+                manifest.total_completion_tokens = acc.total_completion_tokens;
+                manifest.estimated_cost_usd = acc.cost_tracker.estimated_cost_usd;
+                manifest.updated_at = epoch_secs();
+                if let Some(ref mgr) = modules.session_manager
+                    && let Err(e) = mgr.save_manifest(manifest)
+                {
+                    warn!("Failed to update session manifest: {e}");
+                }
+            }
         }
 
         Ok(finalize_run(
@@ -528,7 +566,9 @@ impl<'a> Harness<'a> {
 pub(crate) struct ModuleState {
     pub(crate) summarizer: Option<Summarizer>,
     pub(crate) tool_metas: Vec<ToolResultMeta>,
-    pub(crate) checkpoint_manager: Option<CheckpointManager>,
+    pub(crate) session_manager: Option<SessionManager>,
+    pub(crate) session_manifest: Option<SessionManifest>,
+    pub(crate) cleanup_on_success: bool,
     pub(crate) tool_cache: Option<ToolResultCache>,
     pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) reminders: ReminderRegistry,
@@ -558,14 +598,12 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         None
     };
 
-    let checkpoint_manager = if config.checkpoint.enabled
-        && let Some(ref ckpt_config) = config.checkpoint.config
-    {
-        match CheckpointManager::new(ckpt_config.clone()) {
+    let session_manager = if config.session.enabled {
+        match SessionManager::new(&config.session.sessions_dir) {
             Ok(mgr) => Some(mgr),
             Err(e) => {
                 warn!(
-                    "Failed to initialize checkpoint manager: {e}. Continuing without checkpointing."
+                    "Failed to initialize session manager: {e}. Continuing without session management."
                 );
                 None
             }
@@ -595,7 +633,9 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
     ModuleState {
         summarizer,
         tool_metas: Vec::new(),
-        checkpoint_manager,
+        session_manager,
+        session_manifest: None,
+        cleanup_on_success: config.session.cleanup_on_success,
         tool_cache,
         agent_profile,
         reminders: ReminderRegistry::with_defaults(),
@@ -677,12 +717,30 @@ fn finalize_run(
         });
     }
 
-    // Clean up checkpoints on success.
-    if acc.finished
-        && let Some(ref ckpt_mgr) = modules.checkpoint_manager
-        && let Err(e) = ckpt_mgr.cleanup(&acc.trace_id)
-    {
-        warn!("Failed to clean up checkpoints: {e}");
+    // Finalize session manifest.
+    if let Some(ref mut manifest) = modules.session_manifest {
+        manifest.status = if acc.finished {
+            SessionStatus::Completed
+        } else {
+            SessionStatus::Interrupted
+        };
+        manifest.last_round = acc.rounds_used;
+        manifest.total_prompt_tokens = acc.total_prompt_tokens;
+        manifest.total_completion_tokens = acc.total_completion_tokens;
+        manifest.estimated_cost_usd = acc.cost_tracker.estimated_cost_usd;
+        manifest.updated_at = epoch_secs();
+
+        if let Some(ref mgr) = modules.session_manager {
+            if let Err(e) = mgr.save_manifest(manifest) {
+                warn!("Failed to save final session manifest: {e}");
+            }
+            // Clean up round checkpoints on success (keep manifest).
+            if acc.finished && modules.cleanup_on_success
+                && let Err(e) = mgr.cleanup_checkpoints(&acc.trace_id)
+            {
+                warn!("Failed to clean up session checkpoints: {e}");
+            }
+        }
     }
 
     // Record run outcome in agent profile and save.
@@ -1106,7 +1164,7 @@ mod tests {
         // Advanced modules are enabled by default.
         assert!(config.eviction.enabled);
         assert!(config.summarizer.enabled);
-        assert!(config.checkpoint.enabled);
+        assert!(config.session.enabled);
         assert!(config.cache.enabled);
         assert!(config.plan_execute.enabled);
         assert!(!config.streaming);
@@ -1128,14 +1186,14 @@ mod tests {
         let config = HarnessConfig {
             eviction: HarnessEvictionConfig::disabled(),
             summarizer: HarnessSummarizerConfig::disabled(),
-            checkpoint: HarnessCheckpointConfig::disabled(),
+            session: HarnessSessionConfig::disabled(),
             cache: HarnessCacheConfig::disabled(),
             plan_execute: HarnessPlanExecuteConfig::disabled(),
             ..Default::default()
         };
         assert!(!config.eviction.enabled);
         assert!(!config.summarizer.enabled);
-        assert!(!config.checkpoint.enabled);
+        assert!(!config.session.enabled);
         assert!(!config.cache.enabled);
         assert!(!config.plan_execute.enabled);
     }
@@ -1308,7 +1366,7 @@ mod tests {
         assert!(config.memory_prompt.is_none());
         // Internal modules stay enabled — not exposed via builder.
         assert!(config.eviction.enabled);
-        assert!(config.checkpoint.enabled);
+        assert!(config.session.enabled);
     }
 
     #[test]

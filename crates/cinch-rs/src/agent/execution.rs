@@ -9,6 +9,7 @@ use super::config::HarnessConfig;
 use super::events::{EventHandler, EventResponse, HarnessEvent};
 use super::harness::{compact_if_needed, ModuleState};
 use crate::agent::checkpoint::Checkpoint;
+use crate::agent::session::SessionManager;
 use crate::api::retry::{self, RetryConfig};
 use crate::context::ContextBudget;
 use crate::context::eviction::{self, ToolResultMeta};
@@ -388,10 +389,10 @@ async fn dispatch_tool_execution(
 
 // ── Checkpointing ─────────────────────────────────────────────────
 
-/// Save a checkpoint for the current round.
+/// Save a checkpoint for the current round via the [`SessionManager`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_round_checkpoint(
-    checkpoint_manager: &Option<crate::agent::checkpoint::CheckpointManager>,
+    session_manager: &Option<SessionManager>,
     trace_id: &str,
     messages: &[Message],
     text_output: &[String],
@@ -401,7 +402,7 @@ pub(crate) fn save_round_checkpoint(
     estimated_cost_usd: f64,
     event_handler: &dyn EventHandler,
 ) {
-    let Some(ckpt_mgr) = checkpoint_manager else {
+    let Some(mgr) = session_manager else {
         return;
     };
     let checkpoint = Checkpoint {
@@ -420,7 +421,7 @@ pub(crate) fn save_round_checkpoint(
                 .as_secs()
         ),
     };
-    match ckpt_mgr.save(&checkpoint) {
+    match mgr.save_checkpoint(&checkpoint) {
         Ok(path) => {
             let path_str = path.display().to_string();
             event_handler.on_event(&HarnessEvent::CheckpointSaved {

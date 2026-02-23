@@ -366,7 +366,7 @@ fn build_child_harness_config(resolved: ResolvedConfig) -> (HarnessConfig, Strin
         max_rounds: resolved.max_rounds,
         max_tokens: 4096,
         temperature: 0.7,
-        checkpoint: crate::agent::config::HarnessCheckpointConfig::disabled(),
+        session: crate::agent::config::HarnessSessionConfig::disabled(),
         memory_prompt: None,
         plan_execute: resolved.plan_execute,
         ..Default::default()
