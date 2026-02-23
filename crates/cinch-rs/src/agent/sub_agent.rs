@@ -193,6 +193,34 @@ impl SharedResources {
 
 // ── DelegateSubAgentTool ────────────────────────────────────────────
 
+/// Specialization type for sub-agents. Each type maps to pre-configured
+/// settings (model, max_rounds, plan-execute, system prompt) so the LLM
+/// doesn't need to understand internal tradeoffs.
+#[derive(Deserialize, JsonSchema, Debug, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentType {
+    /// Fast, read-only exploration. Uses read-only tools, rounds scale with thoroughness.
+    Explore,
+    /// General-purpose worker. Full tool access.
+    #[default]
+    Worker,
+    /// Planning agent. Read-only tools, returns a structured plan. Does not make changes.
+    Planner,
+}
+
+/// Controls the depth of exploration or planning for Explore agents.
+#[derive(Deserialize, JsonSchema, Debug, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Thoroughness {
+    /// Quick scan — 5 rounds.
+    Quick,
+    /// Moderate exploration — 10 rounds.
+    #[default]
+    Medium,
+    /// Deep investigation — 20 rounds.
+    Thorough,
+}
+
 /// Typed arguments for the `delegate_sub_agent` tool.
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct DelegateSubAgentArgs {
@@ -200,28 +228,79 @@ pub struct DelegateSubAgentArgs {
     pub name: String,
     /// The task to delegate to the sub-agent.
     pub task: String,
-    /// Optional model override (e.g. use a cheaper model for simple subtasks).
+    /// Agent specialization type. Defaults to "worker".
+    #[serde(default)]
+    pub agent_type: SubAgentType,
+    /// Thoroughness level for explore agents. Ignored for other types.
+    #[serde(default)]
+    pub thoroughness: Thoroughness,
+    /// Optional model override. If not set, inherits the parent's model.
     #[serde(default)]
     pub model: Option<String>,
-    /// Maximum rounds for the sub-agent (default: 10).
-    #[serde(default = "default_max_rounds")]
-    pub max_rounds: u32,
+    /// Optional max rounds override. If not set, determined by agent_type and thoroughness.
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
     /// Maximum result characters returned to the parent (default: 4000).
     #[serde(default = "default_max_result_chars")]
     pub max_result_chars: usize,
-    /// Whether the sub-agent should plan before executing (default: false).
-    /// Enable for complex subtasks that benefit from a read-only exploration
-    /// phase before taking action. Most focused subtasks should skip planning.
+    /// Optional plan-execute override. If not set, determined by agent_type.
+    /// For worker type: set to true to enable a planning phase before execution.
     #[serde(default)]
-    pub plan: bool,
-}
-
-fn default_max_rounds() -> u32 {
-    10
+    pub plan: Option<bool>,
+    /// Optional context to inject into the sub-agent's system prompt.
+    /// Use this to pass relevant findings, file contents, or decisions from
+    /// the parent conversation so the child doesn't have to re-discover them.
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 fn default_max_result_chars() -> usize {
     4000
+}
+
+// ── System prompts per type ──────────────────────────────────────────
+
+fn explore_system_prompt(name: &str) -> String {
+    format!(
+        "You are a focused exploration agent named '{name}'. Search the codebase to \
+         answer the question. Use read-only tools (read_file, grep, list_files, \
+         find_files). Be thorough but concise in your findings. Do not ask clarifying \
+         questions — do your best with the information given."
+    )
+}
+
+fn worker_system_prompt(name: &str) -> String {
+    format!(
+        "You are a focused sub-agent named '{name}'. Complete the following task \
+         and provide a concise result. Do not ask clarifying questions — \
+         do your best with the information given."
+    )
+}
+
+fn planner_system_prompt(name: &str) -> String {
+    format!(
+        "You are a planning agent named '{name}'. Analyze the task, explore the \
+         codebase, and produce a structured implementation plan. Do not make \
+         changes — only plan. Do not ask clarifying questions — do your best \
+         with the information given."
+    )
+}
+
+/// Build a plan-execute config that stays in planning mode for the entire run.
+/// Used by Explore and Planner types to restrict tools to read-only.
+fn plan_execute_read_only(max_rounds: u32) -> crate::agent::config::HarnessPlanExecuteConfig {
+    use crate::agent::config::Toggle;
+    use crate::agent::plan_execute::PlanExecuteConfig;
+
+    Toggle {
+        enabled: true,
+        config: PlanExecuteConfig {
+            // Set max_planning_rounds equal to the full round budget so the
+            // agent never transitions to execution — it stays read-only.
+            max_planning_rounds: max_rounds,
+            ..PlanExecuteConfig::default()
+        },
+    }
 }
 
 /// A tool that spawns a child harness run for recursive sub-agent delegation.
@@ -272,13 +351,13 @@ impl Tool for DelegateSubAgentTool {
     fn definition(&self) -> ToolDef {
         ToolDef::new(
             "delegate_sub_agent",
-            "Delegate a subtask to a child agent that runs in its own isolated \
-             context window. The child agent has access to the same tools and returns a \
-             compact result. Use this to decompose complex tasks, parallelize independent \
-             subtasks (multiple delegate_sub_agent calls in one round run concurrently), \
-             or offload work that would consume too much context. The child's full \
-             conversation is not visible to you — only the result summary. Set plan=true \
-             for complex subtasks that benefit from a planning phase before execution.",
+            "Delegate a subtask to a specialized child agent. Types:\n\
+             - explore: Read-only codebase exploration (set thoroughness: quick/medium/thorough)\n\
+             - worker (default): General-purpose execution with full tool access\n\
+             - planner: Read-only planning that returns a structured implementation plan\n\
+             All fields except name and task are optional. Use context to pass relevant \
+             findings (file contents, decisions, error messages) so the child doesn't have \
+             to re-discover them. Multiple delegate_sub_agent calls in one round run concurrently.",
             crate::json_schema_for::<DelegateSubAgentArgs>(),
         )
     }
@@ -298,7 +377,8 @@ impl Tool for DelegateSubAgentTool {
                     return format!(
                         "Error: invalid arguments for delegate_sub_agent: {e}. \
                          Required: name (string), task (string). \
-                         Optional: model (string), max_rounds (integer), max_result_chars (integer)."
+                         Optional: agent_type, thoroughness, model, max_rounds, plan, \
+                         max_result_chars, context."
                     );
                 }
             };
@@ -322,8 +402,6 @@ impl Tool for DelegateSubAgentTool {
                 }
             };
 
-            let child_model = args.model.unwrap_or(parent_model);
-
             // Create child shared resources with incremented depth.
             let child_shared = match shared.child() {
                 Some(s) => s,
@@ -335,24 +413,57 @@ impl Tool for DelegateSubAgentTool {
                 }
             };
 
-            info!(
-                "Spawning sub-agent '{}' (depth={}, model={}, max_rounds={})",
-                args.name, child_shared.depth, child_model, args.max_rounds
-            );
+            // Resolve type-based defaults, then apply explicit overrides.
+            let (child_model, max_rounds, plan_execute, base_system_prompt) =
+                match args.agent_type {
+                    SubAgentType::Explore => {
+                        let default_rounds = match args.thoroughness {
+                            Thoroughness::Quick => 5,
+                            Thoroughness::Medium => 10,
+                            Thoroughness::Thorough => 20,
+                        };
+                        let rounds = args.max_rounds.unwrap_or(default_rounds);
+                        (
+                            args.model.unwrap_or_else(|| parent_model.clone()),
+                            rounds,
+                            plan_execute_read_only(rounds),
+                            explore_system_prompt(&args.name),
+                        )
+                    }
+                    SubAgentType::Worker => {
+                        let rounds = args.max_rounds.unwrap_or(10);
+                        let pe = match args.plan {
+                            Some(true) => {
+                                crate::agent::config::HarnessPlanExecuteConfig::default()
+                            }
+                            _ => crate::agent::config::HarnessPlanExecuteConfig::disabled(),
+                        };
+                        (
+                            args.model.unwrap_or_else(|| parent_model.clone()),
+                            rounds,
+                            pe,
+                            worker_system_prompt(&args.name),
+                        )
+                    }
+                    SubAgentType::Planner => {
+                        let rounds = args.max_rounds.unwrap_or(10);
+                        (
+                            args.model.unwrap_or_else(|| parent_model.clone()),
+                            rounds,
+                            plan_execute_read_only(rounds),
+                            planner_system_prompt(&args.name),
+                        )
+                    }
+                };
 
-            // Build a child harness config — disable checkpoint and memory prompt
-            // in children since the parent handles cross-session concerns.
-            // Plan-execute is off by default for sub-agents (the parent already
-            // planned), but can be opted in for complex subtasks.
-            let plan_execute = if args.plan {
-                crate::agent::config::HarnessPlanExecuteConfig::default()
-            } else {
-                crate::agent::config::HarnessPlanExecuteConfig::disabled()
-            };
+            info!(
+                "Spawning sub-agent '{}' (type={:?}, depth={}, model={}, max_rounds={})",
+                args.name, args.agent_type, child_shared.depth, child_model, max_rounds
+            );
 
             let child_config = HarnessConfig {
                 model: child_model,
-                max_rounds: args.max_rounds,
+                max_rounds,
                 max_tokens: 4096,
                 temperature: 0.7,
                 checkpoint: crate::agent::config::HarnessCheckpointConfig::disabled(),
@@ -361,14 +472,15 @@ impl Tool for DelegateSubAgentTool {
                 ..Default::default()
             };
 
-            // Child messages: system prompt + user task.
+            // Child messages: system prompt (with optional parent context) + user task.
+            let system_prompt = if let Some(ref ctx) = args.context {
+                format!("{base_system_prompt}\n\nContext from parent:\n{ctx}")
+            } else {
+                base_system_prompt
+            };
+
             let child_messages = vec![
-                Message::system(format!(
-                    "You are a focused sub-agent named '{}'. Complete the following task \
-                     and provide a concise result. Do not ask clarifying questions — \
-                     do your best with the information given.",
-                    args.name
-                )),
+                Message::system(system_prompt),
                 Message::user(args.task),
             ];
 
@@ -485,4 +597,117 @@ mod tests {
         sem.acquire(250);
         assert!((sem.usage_fraction() - 0.25).abs() < 0.01);
     }
+
+    // ── SubAgentType & Thoroughness tests ──────────────────────────
+
+    #[test]
+    fn sub_agent_type_default_is_worker() {
+        let t: SubAgentType = Default::default();
+        assert!(matches!(t, SubAgentType::Worker));
+    }
+
+    #[test]
+    fn thoroughness_default_is_medium() {
+        let t: Thoroughness = Default::default();
+        assert!(matches!(t, Thoroughness::Medium));
+    }
+
+    #[test]
+    fn sub_agent_type_deserialize_variants() {
+        let explore: SubAgentType = serde_json::from_str(r#""explore""#).unwrap();
+        assert!(matches!(explore, SubAgentType::Explore));
+
+        let worker: SubAgentType = serde_json::from_str(r#""worker""#).unwrap();
+        assert!(matches!(worker, SubAgentType::Worker));
+
+        let planner: SubAgentType = serde_json::from_str(r#""planner""#).unwrap();
+        assert!(matches!(planner, SubAgentType::Planner));
+    }
+
+    #[test]
+    fn thoroughness_deserialize_variants() {
+        let quick: Thoroughness = serde_json::from_str(r#""quick""#).unwrap();
+        assert!(matches!(quick, Thoroughness::Quick));
+
+        let medium: Thoroughness = serde_json::from_str(r#""medium""#).unwrap();
+        assert!(matches!(medium, Thoroughness::Medium));
+
+        let thorough: Thoroughness = serde_json::from_str(r#""thorough""#).unwrap();
+        assert!(matches!(thorough, Thoroughness::Thorough));
+    }
+
+    #[test]
+    fn args_minimal_deserialization() {
+        // Only required fields: name and task. Everything else defaults.
+        let json = r#"{"name": "test", "task": "do something"}"#;
+        let args: DelegateSubAgentArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.name, "test");
+        assert_eq!(args.task, "do something");
+        assert!(matches!(args.agent_type, SubAgentType::Worker));
+        assert!(matches!(args.thoroughness, Thoroughness::Medium));
+        assert!(args.model.is_none());
+        assert!(args.max_rounds.is_none());
+        assert!(args.plan.is_none());
+        assert!(args.context.is_none());
+        assert_eq!(args.max_result_chars, 4000);
+    }
+
+    #[test]
+    fn args_explore_with_thoroughness() {
+        let json = r#"{
+            "name": "explorer",
+            "task": "find all tests",
+            "agent_type": "explore",
+            "thoroughness": "thorough"
+        }"#;
+        let args: DelegateSubAgentArgs = serde_json::from_str(json).unwrap();
+        assert!(matches!(args.agent_type, SubAgentType::Explore));
+        assert!(matches!(args.thoroughness, Thoroughness::Thorough));
+    }
+
+    #[test]
+    fn args_with_overrides() {
+        let json = r#"{
+            "name": "custom",
+            "task": "do it",
+            "agent_type": "explore",
+            "max_rounds": 15,
+            "model": "openai/gpt-4o"
+        }"#;
+        let args: DelegateSubAgentArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.max_rounds, Some(15));
+        assert_eq!(args.model.as_deref(), Some("openai/gpt-4o"));
+    }
+
+    #[test]
+    fn system_prompt_explore_contains_name() {
+        let prompt = explore_system_prompt("searcher");
+        assert!(prompt.contains("searcher"));
+        assert!(prompt.contains("exploration"));
+        assert!(prompt.contains("read-only"));
+    }
+
+    #[test]
+    fn system_prompt_worker_contains_name() {
+        let prompt = worker_system_prompt("builder");
+        assert!(prompt.contains("builder"));
+        assert!(prompt.contains("sub-agent"));
+    }
+
+    #[test]
+    fn system_prompt_planner_contains_name() {
+        let prompt = planner_system_prompt("architect");
+        assert!(prompt.contains("architect"));
+        assert!(prompt.contains("planning"));
+        assert!(prompt.contains("Do not make changes"));
+    }
+
+    #[test]
+    fn plan_execute_read_only_stays_in_planning() {
+        let pe = plan_execute_read_only(15);
+        assert!(pe.enabled);
+        assert_eq!(pe.config.max_planning_rounds, 15);
+    }
+
+
 }
