@@ -16,7 +16,9 @@
 //! - [`profile`] — persistent agent identity with per-tool usage stats and
 //!   cost tracking across sessions.
 //! - [`memory`] — file-based cross-session memory (learnings, scratchpad).
-//! - [`prompt`] — [`SystemPromptBuilder`] for multi-section prompt assembly.
+//! - [`prompt`] — [`SystemPromptBuilder`] for multi-section prompt assembly,
+//!   [`PromptRegistry`] for conditional section loading, and [`ReminderRegistry`]
+//!   for mid-conversation system reminders.
 
 pub mod checkpoint;
 pub mod config;
@@ -40,5 +42,8 @@ pub use events::{
 pub use gather::{ContextGatherer, GatherEvent, GatherObserver, UiGatherObserver};
 pub use harness::Harness;
 pub use profile::AgentProfile;
-pub use prompt::SystemPromptBuilder;
+pub use prompt::{
+    PromptRegistry, PromptSection, ReminderFrequency, ReminderRegistry, RoundContext, Stability,
+    SystemPromptBuilder, SystemReminder, TurnContext,
+};
 pub use sub_agent::{SharedResources, TokenBudgetSemaphore};

@@ -15,6 +15,7 @@ use super::execution::{execute_and_record_tool_calls, save_round_checkpoint, sen
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
 use crate::agent::profile::AgentProfile;
+use crate::agent::prompt::reminders::{ReminderRegistry, RoundContext};
 use crate::agent::sub_agent::SharedResources;
 use crate::context::eviction::{self, ToolResultMeta};
 use crate::context::layout::ContextLayout;
@@ -312,6 +313,25 @@ impl<'a> Harness<'a> {
                 context_breakdown: Some(&breakdown),
             });
 
+            // ── System reminders ──
+            let round_ctx = RoundContext {
+                round: round + 1,
+                max_rounds: self.config.max_rounds,
+                context_usage_pct: usage.usage_pct,
+                total_tool_calls: modules.tool_metas.len(),
+                model: model_for_round.clone(),
+            };
+            let reminder_texts = modules.reminders.collect_reminders(&round_ctx);
+            for text in &reminder_texts {
+                layout.push_message(Message::user(text));
+            }
+            // Re-assemble messages if reminders were injected.
+            let api_messages = if reminder_texts.is_empty() {
+                api_messages
+            } else {
+                layout.to_messages()
+            };
+
             // ── Send request ──
             let completion = send_round_request(
                 &self.config,
@@ -487,6 +507,7 @@ pub(crate) struct ModuleState {
     pub(crate) checkpoint_manager: Option<CheckpointManager>,
     pub(crate) tool_cache: Option<ToolResultCache>,
     pub(crate) agent_profile: Option<AgentProfile>,
+    pub(crate) reminders: ReminderRegistry,
 }
 
 /// Values accumulated across rounds during a harness run.
@@ -552,6 +573,7 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         checkpoint_manager,
         tool_cache,
         agent_profile,
+        reminders: ReminderRegistry::with_defaults(),
     }
 }
 
