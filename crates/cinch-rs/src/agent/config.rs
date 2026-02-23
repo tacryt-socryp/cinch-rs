@@ -37,11 +37,12 @@
 use crate::ReasoningConfig;
 use crate::agent::checkpoint::CheckpointConfig;
 use crate::agent::plan_execute::PlanExecuteConfig;
+use crate::agent::project_instructions::ProjectInstructions;
 use crate::api::retry::RetryConfig;
 use crate::api::router::RoutingStrategy;
 use crate::context::eviction::EvictionConfig;
 use crate::context::summarizer::SummarizerConfig;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Generic toggle ────────────────────────────────────────────────
 
@@ -169,6 +170,27 @@ impl HarnessProfileConfig {
     }
 }
 
+// ── Memory config ─────────────────────────────────────────────────
+
+/// Configuration for the file-based memory system.
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    /// Path to the MEMORY.md file. When set, the harness reads this file
+    /// at startup and injects its content into the system prompt.
+    pub memory_file: Option<PathBuf>,
+    /// Maximum number of lines to include from MEMORY.md before truncation.
+    pub max_memory_lines: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            memory_file: None,
+            max_memory_lines: 200,
+        }
+    }
+}
+
 // ── Main harness config ───────────────────────────────────────────
 
 /// Configuration for a [`Harness`](super::harness::Harness) run.
@@ -251,6 +273,12 @@ pub struct HarnessConfig {
     /// the profile at start (injecting user instructions) and saves it on
     /// completion (recording tool usage and run outcome).
     pub profile: HarnessProfileConfig,
+    /// Memory system configuration (MEMORY.md index loading).
+    pub memory_config: MemoryConfig,
+    /// Project-level instructions loaded from AGENTS.md hierarchy.
+    /// When set, the prompt is injected into the system message and
+    /// compaction instructions are forwarded to the summarizer.
+    pub project_instructions: Option<ProjectInstructions>,
 }
 
 impl HarnessConfig {
@@ -379,6 +407,39 @@ impl HarnessConfig {
         self.plan_execute.config.execution_prompt = prompt.into();
         self
     }
+
+    /// Set the path to the MEMORY.md file for memory index loading.
+    pub fn with_memory_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.memory_config.memory_file = Some(path.into());
+        self
+    }
+
+    /// Load project instructions from the given project root.
+    ///
+    /// Searches the standard AGENTS.md file hierarchy and sets
+    /// `project_instructions`. If the instructions contain a
+    /// `## Compaction Instructions` section, it is forwarded to the
+    /// summarizer configuration.
+    pub fn with_project_root(mut self, root: impl AsRef<Path>) -> Self {
+        let instructions = ProjectInstructions::load(Some(root.as_ref()));
+        if let Some(ref ci) = instructions.compaction_instructions {
+            self.summarizer.config.compaction_instructions = Some(ci.clone());
+        }
+        self.project_instructions = Some(instructions);
+        self
+    }
+
+    /// Set project instructions directly.
+    ///
+    /// If the instructions contain compaction instructions, they are
+    /// forwarded to the summarizer configuration.
+    pub fn with_project_instructions(mut self, instructions: ProjectInstructions) -> Self {
+        if let Some(ref ci) = instructions.compaction_instructions {
+            self.summarizer.config.compaction_instructions = Some(ci.clone());
+        }
+        self.project_instructions = Some(instructions);
+        self
+    }
 }
 
 impl Default for HarnessConfig {
@@ -406,6 +467,8 @@ impl Default for HarnessConfig {
             memory_prompt: Some(crate::agent::memory::default_memory_prompt()),
             output_schema: None,
             profile: HarnessProfileConfig::default(),
+            memory_config: MemoryConfig::default(),
+            project_instructions: None,
         }
     }
 }

@@ -36,6 +36,10 @@ pub struct SummarizerConfig {
     /// successful. If compaction doesn't reduce by at least this fraction,
     /// trigger a fallback (hard truncation).
     pub min_reduction_fraction: f64,
+    /// Project-specific compaction instructions extracted from AGENTS.md
+    /// `## Compaction Instructions` sections. Appended to the summarizer
+    /// system prompt when present.
+    pub compaction_instructions: Option<String>,
 }
 
 impl Default for SummarizerConfig {
@@ -44,6 +48,7 @@ impl Default for SummarizerConfig {
             model: None, // Use main model if not specified.
             max_summary_tokens: 2048,
             min_reduction_fraction: 0.20,
+            compaction_instructions: None,
         }
     }
 }
@@ -89,7 +94,13 @@ impl Summarizer {
             content.push_str(&format!("[{role}]: {text}\n\n"));
         }
 
-        (SUMMARIZATION_PROMPT.to_string(), content)
+        let sys = if let Some(ref ci) = self.config.compaction_instructions {
+            format!("{SUMMARIZATION_PROMPT}\n\nProject-specific compaction instructions:\n{ci}")
+        } else {
+            SUMMARIZATION_PROMPT.to_string()
+        };
+
+        (sys, content)
     }
 
     /// Record a new summary and advance the boundary.

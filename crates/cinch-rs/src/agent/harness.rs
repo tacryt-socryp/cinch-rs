@@ -184,7 +184,27 @@ impl<'a> Harness<'a> {
 
         // ── Initialize modules ──
         let mut modules = init_modules(&self.config);
-        inject_prompt_extras(&self.config, &mut messages, &modules.agent_profile);
+
+        // Load MEMORY.md index if a memory file is configured.
+        let memory_index_content = self
+            .config
+            .memory_config
+            .memory_file
+            .as_deref()
+            .and_then(|path| {
+                crate::agent::memory::read_memory_index(
+                    path,
+                    self.config.memory_config.max_memory_lines,
+                )
+            });
+
+        inject_prompt_extras(
+            &self.config,
+            &mut messages,
+            &modules.agent_profile,
+            memory_index_content.as_deref(),
+            self.config.project_instructions.as_ref(),
+        );
 
         // Auto-calibrate context budget from the system message if no
         // explicit budget was provided via `with_context_budget()`.
@@ -583,28 +603,60 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
     }
 }
 
-/// Inject memory instructions and agent profile instructions into the system prompt.
+/// Inject memory instructions, project instructions, MEMORY.md content,
+/// and agent profile instructions into the system prompt.
+///
+/// Injection order in the system message:
+/// 1. Memory prompt (instructions — existing convention)
+/// 2. Project instructions prompt (from AGENTS.md hierarchy)
+/// 3. MEMORY.md content (loaded index)
+/// 4. Agent profile instructions (user-defined per-agent instructions)
 fn inject_prompt_extras(
     config: &HarnessConfig,
     messages: &mut [Message],
     profile: &Option<AgentProfile>,
+    memory_index: Option<&str>,
+    project_instructions: Option<&super::project_instructions::ProjectInstructions>,
 ) {
+    // Helper: get mutable ref to system message content.
+    macro_rules! sys_content {
+        ($messages:expr) => {
+            $messages
+                .iter_mut()
+                .find(|m| matches!(m.role, crate::MessageRole::System))
+                .and_then(|m| m.content.as_mut())
+        };
+    }
+
+    // 1. Memory prompt (instructions).
     if let Some(ref mem_prompt) = config.memory_prompt
-        && let Some(sys_msg) = messages
-            .iter_mut()
-            .find(|m| matches!(m.role, crate::MessageRole::System))
-        && let Some(ref mut content) = sys_msg.content
+        && let Some(content) = sys_content!(messages)
     {
         content.push_str("\n\n");
         content.push_str(mem_prompt);
     }
 
+    // 2. Project instructions prompt.
+    if let Some(pi) = project_instructions
+        && !pi.prompt.is_empty()
+        && let Some(content) = sys_content!(messages)
+    {
+        content.push_str("\n\n## Project Instructions\n\n");
+        content.push_str(&pi.prompt);
+    }
+
+    // 3. MEMORY.md content.
+    if let Some(index) = memory_index
+        && let Some(content) = sys_content!(messages)
+    {
+        content.push_str("\n\n## Memory Index\n\n");
+        content.push_str(index);
+    }
+
+    // 4. Agent profile instructions.
     if let Some(profile) = profile
         && let Some(instructions) = profile.instructions_prompt_section()
-        && let Some(sys_msg) = messages
-            .iter_mut()
-            .find(|m| matches!(m.role, crate::MessageRole::System))
-        && let Some(ref mut content) = sys_msg.content
+        && let Some(content) = sys_content!(messages)
     {
         content.push_str(&instructions);
     }
