@@ -79,8 +79,6 @@ Import everything via `use cinch_rs::prelude::*`, or pick individual items:
 |----------|-------------|
 | [docs/VISION.md](docs/VISION.md) | Architecture, design principles, module inventory, implementation status |
 | [docs/DATA-FLOWS.md](docs/DATA-FLOWS.md) | Comprehensive data flow diagrams for every module |
-| [API_IMPROVEMENTS.md](API_IMPROVEMENTS.md) | Ranked improvement proposals with before/after code |
-| [DEEPER_INTEGRATION.md](DEEPER_INTEGRATION.md) | Phase-based integration guide for consumers |
 | **Rustdoc** (`cargo doc --open`) | Full API reference with examples on key types |
 
 ## CLI Usage
