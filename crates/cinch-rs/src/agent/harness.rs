@@ -460,6 +460,8 @@ impl<'a> Harness<'a> {
                 &self.config,
                 self.tools,
                 self.event_handler,
+                self.client,
+                &model_for_round,
                 &self.context_budget,
                 &mut self.tool_filter,
                 &mut layout,
@@ -756,6 +758,9 @@ fn evict_if_needed(
 /// Uses the [`ContextLayout`]'s compaction API: reads compactable messages from the
 /// middle zone, sends them to the summarizer LLM, and applies the result via
 /// [`apply_compaction()`](ContextLayout::apply_compaction).
+///
+/// This is a thin wrapper around [`compact_if_needed()`] called at the start of
+/// each round.
 #[allow(clippy::too_many_arguments)]
 async fn summarize_if_needed(
     config: &HarnessConfig,
@@ -767,22 +772,53 @@ async fn summarize_if_needed(
     model_for_round: &str,
     event_handler: &dyn EventHandler,
 ) {
+    compact_if_needed(
+        config,
+        client,
+        budget,
+        layout,
+        summarizer,
+        tool_metas,
+        model_for_round,
+        event_handler,
+    )
+    .await;
+}
+
+/// Core compaction logic: summarize middle-zone messages when context usage exceeds 80%.
+///
+/// Returns `true` if compaction was performed. This is called both at the start
+/// of each round (via [`summarize_if_needed()`]) and mid-turn after each tool
+/// result when there are remaining tool calls to process.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn compact_if_needed(
+    config: &HarnessConfig,
+    client: &OpenRouterClient,
+    budget: &Option<ContextBudget>,
+    layout: &mut ContextLayout,
+    summarizer: &mut Option<Summarizer>,
+    tool_metas: &mut Vec<ToolResultMeta>,
+    model_for_round: &str,
+    event_handler: &dyn EventHandler,
+) -> bool {
     if !config.summarizer.enabled {
-        return;
+        return false;
     }
     let Some(summ) = summarizer else {
-        return;
+        return false;
     };
-    let Some(budget) = budget else { return };
+    let Some(budget) = budget else {
+        return false;
+    };
     let api_messages = layout.to_messages();
     let usage = budget.estimate_usage(&api_messages);
     if usage.usage_pct < 0.80 {
-        return;
+        return false;
     }
 
     let middle = layout.compactable_messages();
     if middle.is_empty() {
-        return;
+        return false;
     }
 
     // Pass the existing compressed history to the summarizer for merging.
@@ -840,10 +876,13 @@ async fn summarize_if_needed(
                             meta.message_index.saturating_sub(shift) + new_history_slots;
                     }
                 }
+                return true;
             }
+            false
         }
         Err(e) => {
             warn!("Summarization failed: {e}. Continuing without compaction.");
+            false
         }
     }
 }

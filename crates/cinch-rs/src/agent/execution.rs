@@ -7,7 +7,7 @@
 
 use super::config::HarnessConfig;
 use super::events::{EventHandler, EventResponse, HarnessEvent};
-use super::harness::ModuleState;
+use super::harness::{compact_if_needed, ModuleState};
 use crate::agent::checkpoint::Checkpoint;
 use crate::api::retry::{self, RetryConfig};
 use crate::context::ContextBudget;
@@ -98,6 +98,8 @@ pub(crate) async fn execute_and_record_tool_calls(
     config: &HarnessConfig,
     tools: &ToolSet,
     event_handler: &dyn EventHandler,
+    client: &OpenRouterClient,
+    model_for_round: &str,
     context_budget: &Option<ContextBudget>,
     tool_filter: &mut Option<ToolFilter>,
     layout: &mut ContextLayout,
@@ -204,8 +206,10 @@ pub(crate) async fn execute_and_record_tool_calls(
     tool_results.extend(cache_hits);
     tool_results.extend(executed);
 
+    let total_results = tool_results.len();
+
     // Append results to layout with context budget advisories.
-    for (call_id, name, arguments, mut result) in tool_results {
+    for (i, (call_id, name, arguments, mut result)) in tool_results.into_iter().enumerate() {
         if let Some(budget) = context_budget {
             let current_messages = layout.to_messages();
             if let Some(advisory) = budget.advisory(&current_messages) {
@@ -244,6 +248,24 @@ pub(crate) async fn execute_and_record_tool_calls(
         if let Some(ref mut profile) = modules.agent_profile {
             let is_error = result.starts_with("Error:");
             profile.record_tool_call(&name, result.len(), 0, is_error);
+        }
+
+        // Mid-turn compaction: check if context needs compacting after this
+        // tool result, but only when there are remaining results to process.
+        // The between-rounds compaction handles the case after the last result.
+        let remaining = total_results - i - 1;
+        if remaining > 0 {
+            compact_if_needed(
+                config,
+                client,
+                context_budget,
+                layout,
+                &mut modules.summarizer,
+                &mut modules.tool_metas,
+                model_for_round,
+                event_handler,
+            )
+            .await;
         }
     }
 }
