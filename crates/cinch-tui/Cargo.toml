@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Generic terminal UI for cinch-rs powered agents"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-cinch-rs = { path = "../cinch-rs" }
+cinch-rs = { path = "../cinch-rs", version = "0.1.0" }
 ratatui = "0.29"
 crossterm = "0.29"
 serde_json = "1"
