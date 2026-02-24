@@ -814,9 +814,12 @@ pub fn build_default_prompt_registry(
         && !pi.prompt.is_empty()
     {
         let prompt = pi.prompt.clone();
-        registry.register_stable("Project Instructions", 20, |_ctx| true, move |_ctx| {
-            prompt.clone()
-        });
+        registry.register_stable(
+            "Project Instructions",
+            20,
+            |_ctx| true,
+            move |_ctx| prompt.clone(),
+        );
     }
 
     // 3. Memory index.
