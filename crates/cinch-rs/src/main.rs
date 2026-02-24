@@ -199,7 +199,7 @@ struct ToolFileEntry {
 
 /// A tool loaded from a JSON tools file that executes via shell command.
 ///
-/// This implements the [`Tool`] trait from the openrouter crate, bridging
+/// This implements the [`Tool`](cinch_rs::tools::core::Tool) trait from the openrouter crate, bridging
 /// the JSON-defined tools into the harness abstraction.
 struct ShellCommandTool {
     def: ToolDef,
@@ -274,7 +274,7 @@ fn build_user_content(cli: &Cli) -> Result<String, String> {
     }
 }
 
-/// Load tools from a JSON file into a [`ToolSet`].
+/// Load tools from a JSON file into a [`ToolSet`](cinch_rs::tools::core::ToolSet).
 fn load_tools(path: &str) -> Result<cinch_rs::tools::core::ToolSet, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read tools file '{path}': {e}"))?;

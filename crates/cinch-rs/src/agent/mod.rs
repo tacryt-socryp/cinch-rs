@@ -18,8 +18,10 @@
 //! - [`project_instructions`] — project-level instructions loaded from AGENTS.md
 //!   hierarchy with conditional rules and compaction instructions.
 //! - [`prompt`] — [`SystemPromptBuilder`] for multi-section prompt assembly,
-//!   [`PromptRegistry`] for conditional section loading, and [`ReminderRegistry`]
-//!   for mid-conversation system reminders.
+//!   [`PromptRegistry`] for conditional section loading with cache-aware
+//!   stable/dynamic ordering, and [`ReminderRegistry`] for mid-conversation
+//!   system reminders. See [`harness::build_default_prompt_registry`] for the
+//!   standard harness integration.
 
 pub mod checkpoint;
 pub mod config;
@@ -43,7 +45,7 @@ pub use events::{
     ToolResultHandler,
 };
 pub use gather::{ContextGatherer, GatherEvent, GatherObserver, UiGatherObserver};
-pub use harness::Harness;
+pub use harness::{Harness, build_default_prompt_registry};
 pub use hooks::{
     ExternalHookRunner, HookAction, HookConfig, HookEntry, LifecycleHook, LifecycleHookAdapter,
     StopAction,

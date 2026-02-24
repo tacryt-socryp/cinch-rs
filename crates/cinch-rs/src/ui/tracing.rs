@@ -1,5 +1,5 @@
 //! Generic tracing subscriber layer that captures log events into a
-//! [`LogBuffer`] for later draining into [`UiState`].
+//! [`LogBuffer`] for later draining into [`UiState`](super::UiState).
 //!
 //! This layer is UI-agnostic — it writes [`LogLine`] entries into a lock-free
 //! buffer that any frontend can drain at its own pace.  The buffer uses a

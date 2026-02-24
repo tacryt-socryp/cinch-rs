@@ -1,8 +1,9 @@
 //! Named prompt sections with conditions and stability tags.
 //!
 //! The [`PromptRegistry`] stores sections that are conditionally included in the
-//! system prompt based on a [`TurnContext`]. Sections are tagged as [`Stable`]
-//! (cache-friendly, rarely changes) or [`Dynamic`] (varies per turn). The
+//! system prompt based on a [`TurnContext`]. Sections are tagged as
+//! [`Stability::Stable`] (cache-friendly, rarely changes) or
+//! [`Stability::Dynamic`] (varies per turn). The
 //! registry assembles all active sections with stable sections first, maximizing
 //! prompt cache hits.
 
@@ -86,7 +87,17 @@ impl std::fmt::Debug for PromptSection {
 /// Registry of named prompt sections with conditional loading.
 ///
 /// Separates stable (cache-friendly) and dynamic content. When assembled,
-/// stable sections come first to maximize prompt cache hits.
+/// stable sections come first to maximize prompt cache hits. Each section
+/// has a priority within its stability group (lower = earlier), a condition
+/// closure that controls inclusion, and a content closure that generates
+/// the section body.
+///
+/// The [`Harness`](super::super::harness::Harness) can use a registry for
+/// system prompt assembly via
+/// [`HarnessConfig::with_prompt_registry(true)`](super::super::config::HarnessConfig::with_prompt_registry).
+/// Use [`build_default_prompt_registry`](super::super::harness::build_default_prompt_registry)
+/// to get a pre-loaded registry with the standard sections (memory, project
+/// instructions, memory index), then customize it before assembling.
 ///
 /// # Example
 ///

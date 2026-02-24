@@ -2,7 +2,7 @@
 //!
 //! `cinch-rs` provides a complete, model-agnostic agent runtime on top of the
 //! [OpenRouter](https://openrouter.ai/) chat completions API. The core abstraction
-//! is the [`Harness`] — a reusable agentic loop that sends messages to an LLM,
+//! is the [`Harness`](agent::harness::Harness) — a reusable agentic loop that sends messages to an LLM,
 //! executes tool calls, appends results, and repeats until the model produces a
 //! text-only response or a round limit is reached.
 //!
@@ -97,7 +97,12 @@
 //!
 //! - **Build structured prompts:** use
 //!   [`SystemPromptBuilder`](agent::prompt::SystemPromptBuilder) for multi-section
-//!   prompt assembly with conditional sections.
+//!   prompt assembly with conditional sections, or
+//!   [`PromptRegistry`](agent::prompt::PromptRegistry) for named, prioritized
+//!   sections with stable/dynamic cache-aware ordering. Enable via
+//!   [`HarnessConfig::with_prompt_registry(true)`](agent::config::HarnessConfig::with_prompt_registry),
+//!   or call [`build_default_prompt_registry`](agent::harness::build_default_prompt_registry)
+//!   directly for full customization.
 //!
 //! # Modules
 //!

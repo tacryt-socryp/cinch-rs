@@ -12,6 +12,7 @@ At its core is the **Harness** — a reusable agentic loop that sends messages t
 - Cost tracking and token budgeting
 - Streaming responses (SSE)
 - Human-in-the-loop approval
+- Structured prompt assembly with cache-aware section ordering
 
 ## Workspace
 
@@ -139,7 +140,7 @@ let handler = CompositeEventHandler::new()
 
 | Module | Purpose |
 |---|---|
-| `agent` | Harness loop, config, event system, sub-agents, plan-execute, checkpointing |
+| `agent` | Harness loop, config, event system, sub-agents, plan-execute, checkpointing, prompt registry |
 | `tools` | `Tool` trait, `ToolSet`, `FnTool`, caching, DAG execution, filtering, common tools |
 | `context` | Token budget tracking, three-zone layout, eviction, LLM summarization |
 | `api` | Retry with backoff, streaming SSE, model routing strategies, cost tracking |

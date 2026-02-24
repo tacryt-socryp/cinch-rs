@@ -10,8 +10,9 @@
 //! Agent runtime ──writes──▶ Arc<Mutex<UiState>> ◀──reads── UI frontend
 //! ```
 //!
-//! The agent (via [`UiEventHandler`] or direct calls) writes status updates
-//! into [`UiState`]. A UI frontend reads from the same state to render.
+//! The agent (via [`event_handler::UiEventHandler`] or direct calls) writes
+//! status updates into [`UiState`] . A UI frontend reads from the same state
+//! to render.
 //! Domain-specific data lives in the [`UiExtension`] slot.
 
 pub mod ask_user_tool;

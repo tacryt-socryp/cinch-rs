@@ -256,7 +256,7 @@ pub struct HarnessConfig {
     /// File-based memory instructions injected into the system prompt.
     /// When `Some`, the harness appends these instructions to the system
     /// message so the agent knows how to use `memory/` for persistent
-    /// learnings and scratchpad notes. Defaults to [`memory_prompt::default_memory_prompt()`].
+    /// learnings and scratchpad notes. Defaults to [`default_memory_prompt()`](super::memory::default_memory_prompt).
     /// Set to `None` to disable, or provide a custom string to override.
     pub memory_prompt: Option<String>,
     /// Optional JSON Schema for structured output. When set, the final LLM
@@ -276,6 +276,13 @@ pub struct HarnessConfig {
     pub tool_budget: Option<crate::tools::ToolBudget>,
     /// Use compact tool definitions, expanding on first use. Default: `false`.
     pub progressive_tools: bool,
+    /// Use [`PromptRegistry`](super::prompt::PromptRegistry) for system prompt
+    /// assembly instead of manual `inject_prompt_extras`. When `true`, the
+    /// harness builds a registry with the standard sections (memory prompt,
+    /// project instructions, memory index) and assembles them in priority
+    /// order with stable/dynamic separation for prompt cache optimization.
+    /// Default: `false`.
+    pub use_prompt_registry: bool,
 }
 
 impl HarnessConfig {
@@ -439,6 +446,16 @@ impl HarnessConfig {
         self
     }
 
+    /// Enable or disable `PromptRegistry`-based system prompt assembly.
+    ///
+    /// When enabled, the harness uses [`build_default_prompt_registry`](super::harness::build_default_prompt_registry)
+    /// to assemble the system prompt from prioritized, cache-aware sections
+    /// instead of the legacy `inject_prompt_extras` path.
+    pub fn with_prompt_registry(mut self, enabled: bool) -> Self {
+        self.use_prompt_registry = enabled;
+        self
+    }
+
     /// Set the sequential dependency injection policy for parallel tool execution.
     pub fn with_sequential_policy(mut self, policy: crate::tools::dag::SequentialPolicy) -> Self {
         self.sequential_policy = policy;
@@ -487,6 +504,7 @@ impl Default for HarnessConfig {
             project_instructions: None,
             tool_budget: None,
             progressive_tools: false,
+            use_prompt_registry: false,
         }
     }
 }

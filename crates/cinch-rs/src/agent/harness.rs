@@ -8,12 +8,29 @@
 //! Advanced modules (eviction, summarization, model routing, tool filtering,
 //! checkpointing, memory) are enabled by default with sensible defaults.
 //! Callers observe the loop via [`EventHandler`] events.
+//!
+//! # System prompt assembly
+//!
+//! The harness supports two modes for building the system prompt:
+//!
+//! - **Legacy mode** (default) — `inject_prompt_extras` appends memory
+//!   instructions, project instructions, and the MEMORY.md index to the
+//!   caller's system message via `push_str()`.
+//!
+//! - **Registry mode** — enabled via
+//!   [`HarnessConfig::with_prompt_registry(true)`](super::config::HarnessConfig::with_prompt_registry).
+//!   Uses [`build_default_prompt_registry`] to assemble the system prompt
+//!   from prioritized, cache-aware [`PromptRegistry`] sections. Stable
+//!   sections are grouped first to maximize prompt cache hits.
+//!
+//! See [`build_default_prompt_registry`] for details and customization.
 
 use super::config::HarnessConfig;
 use super::events::{EventHandler, EventResponse, HarnessEvent, HarnessResult};
 use super::execution::{execute_and_record_tool_calls, save_round_checkpoint, send_round_request};
 use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
 use crate::agent::prompt::reminders::{ReminderRegistry, RoundContext};
+use crate::agent::prompt::sections::{PromptRegistry, Stability, TurnContext};
 use crate::agent::session::{
     SessionManager, SessionManifest, SessionStatus, epoch_secs, extract_message_preview,
 };
@@ -198,12 +215,39 @@ impl<'a> Harness<'a> {
                     )
                 });
 
-        inject_prompt_extras(
-            &self.config,
-            &mut messages,
-            memory_index_content.as_deref(),
-            self.config.project_instructions.as_ref(),
-        );
+        if self.config.use_prompt_registry {
+            // Extract the existing system message content as the preamble.
+            let preamble = messages
+                .iter()
+                .find(|m| matches!(m.role, crate::MessageRole::System))
+                .and_then(|m| m.content.as_deref())
+                .unwrap_or("")
+                .to_string();
+
+            let registry = build_default_prompt_registry(
+                &preamble,
+                &self.config,
+                memory_index_content.as_deref(),
+            );
+
+            let ctx = TurnContext::default();
+            let assembled = registry.assemble(&ctx);
+
+            // Replace the system message with the assembled prompt.
+            if let Some(sys_msg) = messages
+                .iter_mut()
+                .find(|m| matches!(m.role, crate::MessageRole::System))
+            {
+                sys_msg.content = Some(assembled);
+            }
+        } else {
+            inject_prompt_extras(
+                &self.config,
+                &mut messages,
+                memory_index_content.as_deref(),
+                self.config.project_instructions.as_ref(),
+            );
+        }
 
         // ── Create initial session manifest ──
         if modules.session_manager.is_some() {
@@ -695,6 +739,93 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         file_tracker: Some(FileAccessTracker::new(5)),
         expanded_tools: HashSet::new(),
     }
+}
+
+/// Build a [`PromptRegistry`] with the standard harness sections.
+///
+/// Returns a registry that, when assembled, produces equivalent content to
+/// `inject_prompt_extras` but with proper stable/dynamic ordering for
+/// prompt cache optimization.
+///
+/// The `preamble` is the caller's original system message content. The
+/// three standard sections are registered as stable with ascending
+/// priorities so they appear in a deterministic order:
+///
+/// 1. **Memory Instructions** (priority 10) — raw instructions on how to
+///    use the memory system. Sourced from `config.memory_prompt`.
+/// 2. **Project Instructions** (priority 20) — AGENTS.md hierarchy prompt.
+/// 3. **Memory Index** (priority 30) — MEMORY.md content loaded at startup.
+///
+/// Sections are only registered when their source data is `Some` and
+/// non-empty, so the assembled prompt never contains empty headings.
+///
+/// # Examples
+///
+/// Use the default registry via the harness (simplest path):
+///
+/// ```ignore
+/// let config = HarnessConfig::new("anthropic/claude-sonnet-4", "You are helpful.")
+///     .with_prompt_registry(true);
+/// // The harness calls build_default_prompt_registry internally.
+/// ```
+///
+/// Build and customize the registry before assembling manually:
+///
+/// ```ignore
+/// let mut registry = build_default_prompt_registry(
+///     "You are a coding agent.",
+///     &config,
+///     Some("key: value"),
+/// );
+///
+/// // Remove a standard section.
+/// registry.remove("Memory Index");
+///
+/// // Add a custom dynamic section.
+/// registry.register_dynamic("Context Warning", 50,
+///     |ctx| ctx.context_usage_pct > 0.7,
+///     |ctx| format!("Context at {:.0}%. Wrap up soon.", ctx.context_usage_pct * 100.0),
+/// );
+///
+/// let prompt = registry.assemble(&TurnContext::default());
+/// ```
+pub fn build_default_prompt_registry(
+    preamble: &str,
+    config: &HarnessConfig,
+    memory_index: Option<&str>,
+) -> PromptRegistry {
+    let mut registry = PromptRegistry::new(preamble);
+
+    // 1. Memory prompt (raw instructions, no heading — matches inject_prompt_extras).
+    if let Some(ref mem_prompt) = config.memory_prompt {
+        let mp = mem_prompt.clone();
+        registry.register(
+            "Memory Instructions",
+            "", // raw (no heading) — matches legacy behavior
+            Stability::Stable,
+            10,
+            |_ctx| true,
+            move |_ctx| mp.clone(),
+        );
+    }
+
+    // 2. Project instructions.
+    if let Some(ref pi) = config.project_instructions
+        && !pi.prompt.is_empty()
+    {
+        let prompt = pi.prompt.clone();
+        registry.register_stable("Project Instructions", 20, |_ctx| true, move |_ctx| {
+            prompt.clone()
+        });
+    }
+
+    // 3. Memory index.
+    if let Some(index) = memory_index {
+        let idx = index.to_string();
+        registry.register_stable("Memory Index", 30, |_ctx| true, move |_ctx| idx.clone());
+    }
+
+    registry
 }
 
 /// Inject memory instructions, project instructions, and MEMORY.md content
@@ -1721,5 +1852,166 @@ mod tests {
         let response = composite.on_event(&HarnessEvent::Finished);
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert!(matches!(response, Some(EventResponse::Approve)));
+    }
+
+    // ── PromptRegistry integration ─────────────────────────────────
+
+    #[test]
+    fn build_default_prompt_registry_includes_all_sections() {
+        use crate::agent::project_instructions::ProjectInstructions;
+
+        let config = HarnessConfig {
+            memory_prompt: Some("Use memory/ for notes.".into()),
+            project_instructions: Some(ProjectInstructions {
+                prompt: "Always use Rust.".into(),
+                compaction_instructions: None,
+                conditional_rules: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let registry =
+            build_default_prompt_registry("You are an agent.", &config, Some("key: value"));
+        let ctx = TurnContext::default();
+        let assembled = registry.assemble(&ctx);
+
+        assert!(assembled.contains("You are an agent."));
+        assert!(assembled.contains("Use memory/ for notes."));
+        assert!(assembled.contains("Always use Rust."));
+        assert!(assembled.contains("key: value"));
+        assert_eq!(registry.section_count(), 3);
+    }
+
+    #[test]
+    fn build_default_prompt_registry_skips_none_sections() {
+        let config = HarnessConfig {
+            memory_prompt: None,
+            project_instructions: None,
+            ..Default::default()
+        };
+
+        let registry = build_default_prompt_registry("Preamble", &config, None);
+        let ctx = TurnContext::default();
+        let assembled = registry.assemble(&ctx);
+
+        assert_eq!(assembled, "Preamble");
+        assert_eq!(registry.section_count(), 0);
+    }
+
+    #[test]
+    fn build_default_prompt_registry_stable_ordering() {
+        use crate::agent::project_instructions::ProjectInstructions;
+
+        let config = HarnessConfig {
+            memory_prompt: Some("memory instructions".into()),
+            project_instructions: Some(ProjectInstructions {
+                prompt: "project rules".into(),
+                compaction_instructions: None,
+                conditional_rules: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let registry =
+            build_default_prompt_registry("Preamble", &config, Some("memory index content"));
+        let ctx = TurnContext::default();
+        let assembled = registry.assemble(&ctx);
+
+        // Memory instructions (priority 10) before project (20) before index (30).
+        let mem_pos = assembled.find("memory instructions").unwrap();
+        let proj_pos = assembled.find("project rules").unwrap();
+        let idx_pos = assembled.find("memory index content").unwrap();
+        assert!(mem_pos < proj_pos, "memory before project");
+        assert!(proj_pos < idx_pos, "project before index");
+    }
+
+    #[test]
+    fn build_default_prompt_registry_preamble_first() {
+        use crate::agent::project_instructions::ProjectInstructions;
+
+        let config = HarnessConfig {
+            memory_prompt: Some("memory".into()),
+            project_instructions: Some(ProjectInstructions {
+                prompt: "project".into(),
+                compaction_instructions: None,
+                conditional_rules: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let registry = build_default_prompt_registry("PREAMBLE_TEXT", &config, Some("index"));
+        let assembled = registry.assemble(&TurnContext::default());
+
+        assert!(assembled.starts_with("PREAMBLE_TEXT"));
+    }
+
+    #[test]
+    fn registry_output_matches_inject_prompt_extras() {
+        use crate::agent::project_instructions::ProjectInstructions;
+
+        let config = HarnessConfig {
+            memory_prompt: Some("Use memory/ for persistent notes.".into()),
+            project_instructions: Some(ProjectInstructions {
+                prompt: "Follow Rust conventions.".into(),
+                compaction_instructions: None,
+                conditional_rules: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let preamble = "You are a coding agent.";
+        let memory_index = "key: value\nother: data";
+
+        // Build via inject_prompt_extras.
+        let mut messages = vec![Message::system(preamble)];
+        inject_prompt_extras(
+            &config,
+            &mut messages,
+            Some(memory_index),
+            config.project_instructions.as_ref(),
+        );
+        let legacy_prompt = messages[0].content.as_deref().unwrap().to_string();
+
+        // Build via registry.
+        let registry = build_default_prompt_registry(preamble, &config, Some(memory_index));
+        let registry_prompt = registry.assemble(&TurnContext::default());
+
+        // Both should contain the same content sections.
+        // The exact format differs (registry uses `## Heading\n\nContent` while
+        // legacy uses `\n\n## Heading\n\nContent` inline), but the key content
+        // and ordering should match.
+        assert!(legacy_prompt.contains(preamble));
+        assert!(registry_prompt.contains(preamble));
+
+        assert!(legacy_prompt.contains("Use memory/ for persistent notes."));
+        assert!(registry_prompt.contains("Use memory/ for persistent notes."));
+
+        assert!(legacy_prompt.contains("Follow Rust conventions."));
+        assert!(registry_prompt.contains("Follow Rust conventions."));
+
+        assert!(legacy_prompt.contains("key: value\nother: data"));
+        assert!(registry_prompt.contains("key: value\nother: data"));
+
+        // Verify ordering: preamble < memory < project < index in both.
+        for prompt in &[&legacy_prompt, &registry_prompt] {
+            let p_preamble = prompt.find(preamble).unwrap();
+            let p_memory = prompt.find("Use memory/").unwrap();
+            let p_project = prompt.find("Follow Rust").unwrap();
+            let p_index = prompt.find("key: value").unwrap();
+            assert!(p_preamble < p_memory);
+            assert!(p_memory < p_project);
+            assert!(p_project < p_index);
+        }
+    }
+
+    #[test]
+    fn use_prompt_registry_default_false() {
+        let config = HarnessConfig::default();
+        assert!(!config.use_prompt_registry);
+    }
+
+    #[test]
+    fn use_prompt_registry_builder() {
+        let config = HarnessConfig::new("test-model", "prompt").with_prompt_registry(true);
+        assert!(config.use_prompt_registry);
     }
 }

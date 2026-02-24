@@ -9,7 +9,10 @@
 //!    conditions and stability tags. Sections tagged [`Stability::Stable`] form
 //!    the cache-friendly prefix; [`Stability::Dynamic`] sections vary per turn.
 //!    The registry calls [`SystemPromptBuilder`] internally to produce the final
-//!    prompt string.
+//!    prompt string. The [`Harness`](super::harness::Harness) can use a registry
+//!    for system prompt assembly when
+//!    [`HarnessConfig::with_prompt_registry(true)`](super::config::HarnessConfig::with_prompt_registry)
+//!    is set — see [`build_default_prompt_registry`](super::harness::build_default_prompt_registry).
 //!
 //! 3. **[`SystemReminder`]** — mid-conversation system messages injected before
 //!    each API call. Used for context warnings, memory nudges, tool guidance, etc.

@@ -319,8 +319,10 @@ impl ToolSet {
         self.tools.is_empty()
     }
 
-    /// Register all common tools ([`ReadFile`], [`ListDir`], [`Grep`],
-    /// [`FindFiles`], [`Shell`], [`WebSearch`]) plus the [`ThinkTool`] and
+    /// Register all common tools ([`ReadFile`](super::common::ReadFile),
+    /// [`ListDir`](super::common::ListDir), [`Grep`](super::common::Grep),
+    /// [`FindFiles`](super::common::FindFiles), [`Shell`](super::common::Shell),
+    /// [`WebSearch`](super::common::WebSearch)) plus the [`ThinkTool`] and
     /// [`TodoTool`] pseudo-tools. Common tools inherit the `ToolSet`'s
     /// `max_result_bytes`.
     ///

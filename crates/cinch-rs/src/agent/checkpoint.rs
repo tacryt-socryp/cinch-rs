@@ -5,8 +5,7 @@
 //! continues from the last completed round.
 //!
 //! Persistence is handled by [`super::session::SessionManager`]. This module
-//! defines the serializable [`Checkpoint`] struct and the unrelated
-//! [`AdaptiveRoundLimit`].
+//! defines the serializable [`Checkpoint`] struct.
 
 use crate::Message;
 use serde::{Deserialize, Serialize};
