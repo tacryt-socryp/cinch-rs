@@ -375,7 +375,11 @@ fn build_child_harness_config(resolved: ResolvedConfig) -> (HarnessConfig, Strin
 }
 
 /// Build child messages with system prompt (+ optional parent context) and task.
-fn build_child_messages(system_prompt: String, context: Option<&str>, task: String) -> Vec<Message> {
+fn build_child_messages(
+    system_prompt: String,
+    context: Option<&str>,
+    task: String,
+) -> Vec<Message> {
     let prompt = match context {
         Some(ctx) => format!("{system_prompt}\n\nContext from parent:\n{ctx}"),
         None => system_prompt,
@@ -589,11 +593,7 @@ impl BackgroundAgentRegistry {
     }
 
     /// Register a newly-spawned background agent. Returns the assigned ID.
-    fn register(
-        &self,
-        name: String,
-        handle: JoinHandle<Result<SubAgentResult, String>>,
-    ) -> String {
+    fn register(&self, name: String, handle: JoinHandle<Result<SubAgentResult, String>>) -> String {
         let id = format!("bg-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         self.entries.lock().unwrap().insert(
             id.clone(),
@@ -888,7 +888,10 @@ impl Tool for CheckAgentTool {
                 }
                 Ok(Err(e)) => format!("[Background agent '{}' failed] Error: {e}", args.agent_id),
                 Err(join_err) => {
-                    format!("[Background agent '{}' panicked] Error: {join_err}", args.agent_id)
+                    format!(
+                        "[Background agent '{}' panicked] Error: {join_err}",
+                        args.agent_id
+                    )
                 }
             }
         })
@@ -1175,20 +1178,24 @@ mod tests {
     #[tokio::test]
     async fn registry_ids_are_monotonic() {
         let reg = BackgroundAgentRegistry::new();
-        let h1 = tokio::spawn(async { Ok::<_, String>(SubAgentResult {
-            name: "a".into(),
-            output: String::new(),
-            finished: true,
-            rounds_used: 0,
-            tokens_consumed: 0,
-        }) });
-        let h2 = tokio::spawn(async { Ok::<_, String>(SubAgentResult {
-            name: "b".into(),
-            output: String::new(),
-            finished: true,
-            rounds_used: 0,
-            tokens_consumed: 0,
-        }) });
+        let h1 = tokio::spawn(async {
+            Ok::<_, String>(SubAgentResult {
+                name: "a".into(),
+                output: String::new(),
+                finished: true,
+                rounds_used: 0,
+                tokens_consumed: 0,
+            })
+        });
+        let h2 = tokio::spawn(async {
+            Ok::<_, String>(SubAgentResult {
+                name: "b".into(),
+                output: String::new(),
+                finished: true,
+                rounds_used: 0,
+                tokens_consumed: 0,
+            })
+        });
         let id1 = reg.register("a".into(), h1);
         let id2 = reg.register("b".into(), h2);
         assert_eq!(id1, "bg-1");
@@ -1221,8 +1228,7 @@ mod tests {
 
     #[test]
     fn check_agent_args_defaults() {
-        let args: CheckAgentArgs =
-            serde_json::from_str(r#"{"agent_id": "bg-1"}"#).unwrap();
+        let args: CheckAgentArgs = serde_json::from_str(r#"{"agent_id": "bg-1"}"#).unwrap();
         assert_eq!(args.agent_id, "bg-1");
         assert!(args.block); // default true
     }

@@ -22,8 +22,8 @@ pub use crate::{
 pub use crate::agent::{
     CompositeEventHandler, ContextGatherer, EventHandler, EventObserver, EventResponse,
     FnEventHandler, GatherEvent, GatherObserver, Harness, HarnessConfig, HarnessEvent,
-    HarnessResult, LoggingHandler, NoopHandler, SharedResources,
-    SystemPromptBuilder, TokenBudgetSemaphore, ToolResultHandler, UiGatherObserver,
+    HarnessResult, LoggingHandler, NoopHandler, SharedResources, SystemPromptBuilder,
+    TokenBudgetSemaphore, ToolResultHandler, UiGatherObserver,
 };
 
 // ── Context management ──────────────────────────────────────────────

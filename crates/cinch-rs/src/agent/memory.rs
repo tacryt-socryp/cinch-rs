@@ -11,6 +11,25 @@
 
 use std::path::Path;
 
+use crate::{ChatRequest, Message, OpenRouterClient};
+
+/// System prompt for LLM-based memory consolidation.
+///
+/// Instructs the model to merge duplicates, remove stale content, and preserve
+/// technical details verbatim — producing only consolidated Markdown output.
+const CONSOLIDATION_PROMPT: &str = "\
+You are a memory consolidation assistant. Your job is to take a MEMORY.md file \
+that has grown too long and produce a shorter, consolidated version.
+
+Rules:
+- Merge duplicate or overlapping entries into single entries
+- Remove stale or superseded information (keep only the latest/correct version)
+- Preserve file paths, function names, and technical details verbatim
+- Keep semantic organization by topic (use ## headings)
+- Output ONLY the consolidated Markdown — no commentary, no explanation
+- Stay within the target line count provided by the user
+- Prioritize the most useful and actionable information";
+
 /// Returns the default file-based memory prompt for injection into system messages.
 ///
 /// Teaches the agent the MEMORY.md convention:
@@ -71,6 +90,69 @@ pub fn read_memory_index(path: &Path, max_lines: usize) -> Option<String> {
             "{truncated}\n\n[MEMORY.md truncated at {max_lines} of {total} lines. Read the full file for more.]"
         ))
     }
+}
+
+/// Consolidate a MEMORY.md file that exceeds the line limit.
+///
+/// Sends the file content through a cheap LLM call that merges redundant
+/// entries, removes stale content, and produces a trimmed version. The result
+/// is atomically written back (temp file + rename).
+///
+/// Returns `Ok(Some((lines_before, lines_after)))` when consolidation occurred,
+/// `Ok(None)` when the file is missing or already within the limit, or `Err`
+/// on failure.
+pub async fn consolidate_memory(
+    client: &OpenRouterClient,
+    memory_path: &Path,
+    max_lines: usize,
+    model: &str,
+) -> Result<Option<(usize, usize)>, String> {
+    // 1. Read file — if missing, nothing to consolidate.
+    let content = match std::fs::read_to_string(memory_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+
+    // 2. Count lines — if within limit, nothing to do.
+    let lines_before = content.lines().count();
+    if lines_before <= max_lines {
+        return Ok(None);
+    }
+
+    // 3. Build consolidation request.
+    let user_prompt = format!(
+        "Consolidate the following MEMORY.md file to at most {max_lines} lines.\n\n\
+         Current content ({lines_before} lines):\n\n{content}"
+    );
+    let request = ChatRequest {
+        model: Some(model.to_string()),
+        messages: vec![
+            Message::system(CONSOLIDATION_PROMPT),
+            Message::user(&user_prompt),
+        ],
+        max_tokens: 4096,
+        temperature: 0.3,
+        ..Default::default()
+    };
+
+    // 4. Call the LLM.
+    let completion = client
+        .chat(&request)
+        .await
+        .map_err(|e| format!("Memory consolidation LLM call failed: {e}"))?;
+    let consolidated = completion
+        .content
+        .ok_or_else(|| "Memory consolidation returned empty content".to_string())?;
+
+    // 5. Atomic write: temp file + rename.
+    let tmp_path = memory_path.with_extension("md.tmp");
+    std::fs::write(&tmp_path, &consolidated)
+        .map_err(|e| format!("Failed to write temp consolidation file: {e}"))?;
+    std::fs::rename(&tmp_path, memory_path)
+        .map_err(|e| format!("Failed to rename consolidated memory file: {e}"))?;
+
+    let lines_after = consolidated.lines().count();
+    Ok(Some((lines_before, lines_after)))
 }
 
 #[cfg(test)]
@@ -147,5 +229,42 @@ mod tests {
         assert!(result.is_some());
         let content = result.unwrap();
         assert!(!content.contains("truncated"));
+    }
+
+    // ── Consolidation tests ─────────────────────────────────────────
+
+    #[test]
+    fn consolidation_prompt_is_nonempty() {
+        assert!(!CONSOLIDATION_PROMPT.is_empty());
+        assert!(CONSOLIDATION_PROMPT.contains("consolidat"));
+        assert!(CONSOLIDATION_PROMPT.contains("duplicate"));
+        assert!(CONSOLIDATION_PROMPT.contains("Markdown"));
+    }
+
+    #[tokio::test]
+    async fn consolidate_memory_missing_file() {
+        // A dummy client — consolidate_memory returns before using it.
+        let client = OpenRouterClient::new("fake-key").unwrap();
+        let result = consolidate_memory(
+            &client,
+            Path::new("/nonexistent/MEMORY.md"),
+            200,
+            "test-model",
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn consolidate_memory_under_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MEMORY.md");
+        std::fs::write(&path, "# Memory\n\nSome notes.\n").unwrap();
+
+        let client = OpenRouterClient::new("fake-key").unwrap();
+        let result = consolidate_memory(&client, &path, 200, "test-model").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }

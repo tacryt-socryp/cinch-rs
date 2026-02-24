@@ -100,6 +100,11 @@ pub enum HarnessEvent<'a> {
     PhaseTransition { from: &'a Phase, to: &'a Phase },
     /// The agent submitted a plan (called `submit_plan` during planning).
     PlanSubmitted { summary: &'a str },
+    /// MEMORY.md was consolidated (post-session, over the line limit).
+    MemoryConsolidated {
+        lines_before: usize,
+        lines_after: usize,
+    },
 }
 
 impl HarnessEvent<'_> {
@@ -624,6 +629,12 @@ impl EventHandler for LoggingHandler {
             }
             HarnessEvent::PlanSubmitted { summary } => {
                 info!("Plan submitted: {summary}");
+            }
+            HarnessEvent::MemoryConsolidated {
+                lines_before,
+                lines_after,
+            } => {
+                info!("Memory consolidated: {lines_before} → {lines_after} lines");
             }
         }
         None

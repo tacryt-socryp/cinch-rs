@@ -180,7 +180,10 @@ mod tests {
         let note = tracker.build_preservation_note();
         let a_pos = note.find("a.rs").unwrap();
         let b_pos = note.find("b.rs").unwrap();
-        assert!(b_pos < a_pos, "a.rs should be after b.rs (dedup moves to end)");
+        assert!(
+            b_pos < a_pos,
+            "a.rs should be after b.rs (dedup moves to end)"
+        );
     }
 
     #[test]

@@ -309,6 +309,14 @@ impl EventHandler for WebBroadcastHandler {
                     text: format!("[plan] {summary}"),
                 });
             }
+            HarnessEvent::MemoryConsolidated {
+                lines_before,
+                lines_after,
+            } => {
+                self.broadcast(WsMessage::Phase {
+                    phase: format!("Memory consolidated: {lines_before} → {lines_after} lines"),
+                });
+            }
         }
         None // Never controls flow.
     }

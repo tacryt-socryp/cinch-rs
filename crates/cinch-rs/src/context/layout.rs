@@ -244,7 +244,11 @@ impl ContextLayout {
     /// compressed history messages).
     pub fn flat_messages_mut(&mut self) -> Vec<(usize, &mut Message)> {
         let prefix_len = self.prefix.len();
-        let history_msgs = if self.compressed_history.is_some() { 2 } else { 0 };
+        let history_msgs = if self.compressed_history.is_some() {
+            2
+        } else {
+            0
+        };
         let offset = prefix_len + history_msgs;
         let middle_len = self.middle.len();
 
@@ -262,7 +266,11 @@ impl ContextLayout {
     /// `to_messages()` output. Used for tracking message positions for eviction.
     pub fn next_message_index(&self) -> usize {
         self.prefix.len()
-            + if self.compressed_history.is_some() { 2 } else { 0 }
+            + if self.compressed_history.is_some() {
+                2
+            } else {
+                0
+            }
             + self.middle.len()
             + self.recency_window.len()
     }
@@ -277,7 +285,11 @@ impl ContextLayout {
         }
         let index = index - prefix_len;
 
-        let history_len = if self.compressed_history.is_some() { 2 } else { 0 };
+        let history_len = if self.compressed_history.is_some() {
+            2
+        } else {
+            0
+        };
         if index < history_len {
             return None; // synthetic compressed history messages
         }
@@ -315,7 +327,9 @@ impl ContextLayout {
             .map(|s| {
                 // Account for the wrapping <context_summary> tags and assistant ack message
                 let summary_msg_chars = format!("<context_summary>\n{s}\n</context_summary>").len();
-                let ack_chars = "I've reviewed the context summary and will continue from where I left off.".len();
+                let ack_chars =
+                    "I've reviewed the context summary and will continue from where I left off."
+                        .len();
                 ((summary_msg_chars + ack_chars) as f64 / self.chars_per_token) as usize
             })
             .unwrap_or(0);
@@ -331,7 +345,8 @@ impl ContextLayout {
             (total_chars as f64 / self.chars_per_token) as usize
         };
 
-        let total_tokens = prefix_tokens + compressed_history_tokens + middle_tokens + recency_tokens;
+        let total_tokens =
+            prefix_tokens + compressed_history_tokens + middle_tokens + recency_tokens;
 
         ContextBreakdown {
             prefix_tokens,

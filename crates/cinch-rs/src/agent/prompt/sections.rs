@@ -347,9 +347,14 @@ mod tests {
     #[test]
     fn raw_section_no_heading() {
         let mut registry = PromptRegistry::new("P");
-        registry.register("raw-block", "", Stability::Stable, 10, |_| true, |_| {
-            "---\nRaw content here".into()
-        });
+        registry.register(
+            "raw-block",
+            "",
+            Stability::Stable,
+            10,
+            |_| true,
+            |_| "---\nRaw content here".into(),
+        );
         let prompt = registry.assemble(&TurnContext::default());
         assert!(prompt.contains("---\nRaw content here"));
         assert!(!prompt.contains("## ")); // no heading added for raw

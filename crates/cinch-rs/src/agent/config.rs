@@ -166,6 +166,9 @@ pub struct MemoryConfig {
     pub memory_file: Option<PathBuf>,
     /// Maximum number of lines to include from MEMORY.md before truncation.
     pub max_memory_lines: usize,
+    /// Model to use for post-session memory consolidation.
+    /// Falls back through: consolidation_model → summarizer model → main model.
+    pub consolidation_model: Option<String>,
 }
 
 impl Default for MemoryConfig {
@@ -173,6 +176,7 @@ impl Default for MemoryConfig {
         Self {
             memory_file: None,
             max_memory_lines: 200,
+            consolidation_model: None,
         }
     }
 }
@@ -387,6 +391,12 @@ impl HarnessConfig {
     /// Set the path to the MEMORY.md file for memory index loading.
     pub fn with_memory_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.memory_config.memory_file = Some(path.into());
+        self
+    }
+
+    /// Set the model used for post-session memory consolidation.
+    pub fn with_consolidation_model(mut self, model: impl Into<String>) -> Self {
+        self.memory_config.consolidation_model = Some(model.into());
         self
     }
 

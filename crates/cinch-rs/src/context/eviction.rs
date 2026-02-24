@@ -349,9 +349,9 @@ mod tests {
         let mut messages = vec![
             Message::system("system"),
             Message::user("task"),
-            make_tool_msg("c1", &"x".repeat(50)),     // small, round 1
+            make_tool_msg("c1", &"x".repeat(50)), // small, round 1
             make_tool_msg("c2", &"y".repeat(30_000)), // large read_file, round 2
-            make_tool_msg("c3", &"z".repeat(500)),     // medium, round 3
+            make_tool_msg("c3", &"z".repeat(500)), // medium, round 3
         ];
 
         let metas = vec![

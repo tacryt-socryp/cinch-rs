@@ -12,9 +12,11 @@
 use super::config::HarnessConfig;
 use super::events::{EventHandler, EventResponse, HarnessEvent, HarnessResult};
 use super::execution::{execute_and_record_tool_calls, save_round_checkpoint, send_round_request};
-use crate::agent::session::{SessionManager, SessionManifest, SessionStatus, epoch_secs, extract_message_preview};
 use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
 use crate::agent::prompt::reminders::{ReminderRegistry, RoundContext};
+use crate::agent::session::{
+    SessionManager, SessionManifest, SessionStatus, epoch_secs, extract_message_preview,
+};
 use crate::agent::sub_agent::SharedResources;
 use crate::context::eviction::{self, ToolResultMeta};
 use crate::context::file_tracker::FileAccessTracker;
@@ -185,17 +187,17 @@ impl<'a> Harness<'a> {
         let mut modules = init_modules(&self.config);
 
         // Load MEMORY.md index if a memory file is configured.
-        let memory_index_content = self
-            .config
-            .memory_config
-            .memory_file
-            .as_deref()
-            .and_then(|path| {
-                crate::agent::memory::read_memory_index(
-                    path,
-                    self.config.memory_config.max_memory_lines,
-                )
-            });
+        let memory_index_content =
+            self.config
+                .memory_config
+                .memory_file
+                .as_deref()
+                .and_then(|path| {
+                    crate::agent::memory::read_memory_index(
+                        path,
+                        self.config.memory_config.max_memory_lines,
+                    )
+                });
 
         inject_prompt_extras(
             &self.config,
@@ -544,13 +546,45 @@ impl<'a> Harness<'a> {
             }
         }
 
-        Ok(finalize_run(
+        let result = finalize_run(
             &self.config,
             acc,
             layout.to_messages(),
             &mut modules,
             self.event_handler,
-        ))
+        );
+
+        // Post-session memory consolidation.
+        if let Some(ref memory_path) = self.config.memory_config.memory_file {
+            let model = self
+                .config
+                .memory_config
+                .consolidation_model
+                .as_deref()
+                .or(self.config.summarizer.config.model.as_deref())
+                .unwrap_or(&self.config.model);
+
+            match crate::agent::memory::consolidate_memory(
+                self.client,
+                memory_path,
+                self.config.memory_config.max_memory_lines,
+                model,
+            )
+            .await
+            {
+                Ok(Some((before, after))) => {
+                    self.event_handler
+                        .on_event(&HarnessEvent::MemoryConsolidated {
+                            lines_before: before,
+                            lines_after: after,
+                        });
+                }
+                Ok(None) => {}
+                Err(e) => warn!("Memory consolidation failed: {e}"),
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -709,7 +743,8 @@ fn finalize_run(
                 warn!("Failed to save final session manifest: {e}");
             }
             // Clean up round checkpoints on success (keep manifest).
-            if acc.finished && modules.cleanup_on_success
+            if acc.finished
+                && modules.cleanup_on_success
                 && let Err(e) = mgr.cleanup_checkpoints(&acc.trace_id)
             {
                 warn!("Failed to clean up session checkpoints: {e}");
@@ -778,7 +813,11 @@ fn evict_if_needed(
     let mut candidates: Vec<&ToolResultMeta> = tool_metas
         .iter()
         .filter(|m| {
-            !config.eviction.config.protected_tools.contains(&m.tool_name)
+            !config
+                .eviction
+                .config
+                .protected_tools
+                .contains(&m.tool_name)
                 && (round as usize).saturating_sub(m.round) >= config.eviction.config.min_age_rounds
         })
         .collect();
@@ -940,9 +979,8 @@ pub(crate) async fn compact_if_needed(
 
     // Record the middle zone size before compaction for tool_metas reindexing.
     let middle_len = layout.middle_len();
-    let prefix_and_history_len = layout.to_messages().len()
-        - layout.middle_len()
-        - layout.recency_window_len();
+    let prefix_and_history_len =
+        layout.to_messages().len() - layout.middle_len() - layout.recency_window_len();
 
     match client.chat(&summary_request).await {
         Ok(completion) => {
@@ -961,15 +999,13 @@ pub(crate) async fn compact_if_needed(
                 // and reindex remaining ones.
                 let middle_start = prefix_and_history_len;
                 let middle_end = middle_start + middle_len;
-                tool_metas.retain(|m| {
-                    m.message_index < middle_start || m.message_index >= middle_end
-                });
+                tool_metas
+                    .retain(|m| m.message_index < middle_start || m.message_index >= middle_end);
                 // After compaction, the middle is gone and compressed_history now
                 // takes 2 message slots. Adjust indices for messages that were
                 // after the old middle zone.
                 let new_history_slots = 2;
-                let old_history_slots =
-                    if layout.compaction_count() > 1 { 2 } else { 0 };
+                let old_history_slots = if layout.compaction_count() > 1 { 2 } else { 0 };
                 let shift = middle_len + old_history_slots;
                 for meta in tool_metas.iter_mut() {
                     if meta.message_index >= middle_end {

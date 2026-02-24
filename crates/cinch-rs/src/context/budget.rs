@@ -315,8 +315,8 @@ mod tests {
     fn output_reserve_makes_thresholds_trigger_earlier() {
         // With output_reserve, effective window is smaller, so same content
         // hits thresholds at lower absolute token counts.
-        let budget_no_reserve = ContextBudget::with_calibration("sys", None)
-            .with_max_tokens(100_000);
+        let budget_no_reserve =
+            ContextBudget::with_calibration("sys", None).with_max_tokens(100_000);
         let budget_with_reserve = ContextBudget::with_calibration("sys", None)
             .with_max_tokens(100_000)
             .with_output_reserve(20_000);

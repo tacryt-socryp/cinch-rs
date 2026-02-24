@@ -7,7 +7,7 @@
 
 use super::config::HarnessConfig;
 use super::events::{EventHandler, EventResponse, HarnessEvent};
-use super::harness::{compact_if_needed, ModuleState};
+use super::harness::{ModuleState, compact_if_needed};
 use crate::agent::checkpoint::Checkpoint;
 use crate::agent::session::SessionManager;
 use crate::api::retry::{self, RetryConfig};

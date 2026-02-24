@@ -67,7 +67,11 @@ impl ProjectInstructions {
         };
 
         // 2. {root}/AGENTS.md
-        load_unconditional(&root.join("AGENTS.md"), &mut prompt_parts, &mut compaction_parts);
+        load_unconditional(
+            &root.join("AGENTS.md"),
+            &mut prompt_parts,
+            &mut compaction_parts,
+        );
 
         // 3. {root}/.cinch/AGENTS.md
         load_unconditional(
@@ -475,9 +479,18 @@ Web-specific rules here.
 
     #[test]
     fn glob_matches_directory_double_star() {
-        assert!(glob_matches("crates/cinch-web/**", "crates/cinch-web/src/lib.rs"));
-        assert!(glob_matches("crates/cinch-web/**", "crates/cinch-web/Cargo.toml"));
-        assert!(!glob_matches("crates/cinch-web/**", "crates/cinch-rs/src/lib.rs"));
+        assert!(glob_matches(
+            "crates/cinch-web/**",
+            "crates/cinch-web/src/lib.rs"
+        ));
+        assert!(glob_matches(
+            "crates/cinch-web/**",
+            "crates/cinch-web/Cargo.toml"
+        ));
+        assert!(!glob_matches(
+            "crates/cinch-web/**",
+            "crates/cinch-rs/src/lib.rs"
+        ));
     }
 
     #[test]
@@ -539,9 +552,11 @@ Web-specific rules here.
         let instructions = ProjectInstructions::load(Some(root));
         assert!(instructions.prompt.contains("Always run clippy"));
         assert_eq!(instructions.conditional_rules.len(), 1);
-        assert!(instructions.conditional_rules[0]
-            .content
-            .contains("axum patterns"));
+        assert!(
+            instructions.conditional_rules[0]
+                .content
+                .contains("axum patterns")
+        );
     }
 
     #[test]
@@ -556,10 +571,12 @@ Web-specific rules here.
         .unwrap();
 
         let instructions = ProjectInstructions::load(Some(root));
-        assert!(instructions
-            .compaction_instructions
-            .as_ref()
-            .unwrap()
-            .contains("preserve test file paths"));
+        assert!(
+            instructions
+                .compaction_instructions
+                .as_ref()
+                .unwrap()
+                .contains("preserve test file paths")
+        );
     }
 }

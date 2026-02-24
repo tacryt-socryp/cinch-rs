@@ -97,8 +97,7 @@ impl SessionManager {
     /// Atomic write: serialize to a temp file, then rename into place.
     pub fn save_manifest(&self, manifest: &SessionManifest) -> Result<(), String> {
         let dir = self.session_dir(&manifest.trace_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create session dir: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create session dir: {e}"))?;
 
         let final_path = dir.join("manifest.json");
         let tmp_path = dir.join(".manifest.json.tmp");
@@ -119,10 +118,10 @@ impl SessionManager {
         if !path.exists() {
             return Ok(None);
         }
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read manifest: {e}"))?;
-        let manifest: SessionManifest = serde_json::from_str(&json)
-            .map_err(|e| format!("Failed to parse manifest: {e}"))?;
+        let json =
+            std::fs::read_to_string(&path).map_err(|e| format!("Failed to read manifest: {e}"))?;
+        let manifest: SessionManifest =
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse manifest: {e}"))?;
         Ok(Some(manifest))
     }
 
@@ -167,16 +166,14 @@ impl SessionManager {
     /// Save a checkpoint to `{trace_id}/round-{NNN}.json`.
     pub fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<PathBuf, String> {
         let dir = self.session_dir(&checkpoint.trace_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create session dir: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create session dir: {e}"))?;
 
         let filename = Self::round_filename(checkpoint.round);
         let path = dir.join(filename);
 
         let json = serde_json::to_string_pretty(checkpoint)
             .map_err(|e| format!("Failed to serialize checkpoint: {e}"))?;
-        std::fs::write(&path, json)
-            .map_err(|e| format!("Failed to write checkpoint: {e}"))?;
+        std::fs::write(&path, json).map_err(|e| format!("Failed to write checkpoint: {e}"))?;
 
         Ok(path)
     }
@@ -190,13 +187,14 @@ impl SessionManager {
 
         let mut latest: Option<(u32, PathBuf)> = None;
 
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("Failed to read session dir: {e}"))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("Failed to read session dir: {e}"))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(round_str) = name.strip_prefix("round-")
+            if let Some(round_str) = name
+                .strip_prefix("round-")
                 .and_then(|s| s.strip_suffix(".json"))
                 && let Ok(round) = round_str.parse::<u32>()
                 && latest.as_ref().is_none_or(|(r, _)| round > *r)
@@ -226,8 +224,8 @@ impl SessionManager {
         }
 
         let mut count = 0;
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("Failed to read session dir: {e}"))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("Failed to read session dir: {e}"))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
@@ -361,8 +359,10 @@ mod tests {
         let mgr = SessionManager::new(dir.path()).unwrap();
 
         mgr.save_manifest(&make_test_manifest("tr-clean")).unwrap();
-        mgr.save_checkpoint(&make_test_checkpoint("tr-clean", 1)).unwrap();
-        mgr.save_checkpoint(&make_test_checkpoint("tr-clean", 2)).unwrap();
+        mgr.save_checkpoint(&make_test_checkpoint("tr-clean", 1))
+            .unwrap();
+        mgr.save_checkpoint(&make_test_checkpoint("tr-clean", 2))
+            .unwrap();
 
         let count = mgr.cleanup_checkpoints("tr-clean").unwrap();
         assert_eq!(count, 2);
@@ -379,7 +379,8 @@ mod tests {
         let mgr = SessionManager::new(dir.path()).unwrap();
 
         mgr.save_manifest(&make_test_manifest("tr-del")).unwrap();
-        mgr.save_checkpoint(&make_test_checkpoint("tr-del", 1)).unwrap();
+        mgr.save_checkpoint(&make_test_checkpoint("tr-del", 1))
+            .unwrap();
 
         mgr.delete_session("tr-del").unwrap();
         assert!(mgr.load_manifest("tr-del").unwrap().is_none());
