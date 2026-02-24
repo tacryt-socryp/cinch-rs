@@ -358,32 +358,48 @@ impl ToolSet {
         workdir: impl Into<String>,
         config: CommonToolsConfig,
     ) -> Self {
-        use crate::tools::common::{FindFiles, Grep, ListFiles, ReadFile, Shell, WebSearch};
+        use crate::tools::common::{
+            EditFile, FindFiles, Grep, ListFiles, ReadFile, Shell, WebSearch, WriteFile,
+        };
+        use crate::tools::read_tracker::ReadTracker;
+        use std::sync::Arc;
+
         let workdir = workdir.into();
         let max = self.max_result_bytes;
-        self.with(ReadFile::new(workdir.clone()).max_result_bytes(max))
-            .with(ListFiles::new(workdir.clone()))
-            .with(
-                Grep::new(workdir.clone())
-                    .max_matches(config.grep_max_matches)
-                    .max_result_bytes(max),
-            )
-            .with(
-                FindFiles::new(workdir.clone())
-                    .max_results(config.find_max_results)
-                    .max_result_bytes(max),
-            )
-            .with(
-                Shell::new(workdir)
-                    .blocked_commands(config.shell_blocked_commands)
-                    .max_result_bytes(max),
-            )
-            .with_if(
-                std::env::var("BRAVE_SEARCH_KEY").is_ok(),
-                WebSearch::new().max_result_bytes(max),
-            )
-            .with(ThinkTool)
-            .with(TodoTool::new())
+
+        // Shared tracker for read-before-write enforcement across
+        // ReadFile, EditFile, and WriteFile.
+        let tracker = Arc::new(ReadTracker::new());
+
+        self.with(
+            ReadFile::new(workdir.clone())
+                .max_result_bytes(max)
+                .with_tracker(tracker.clone()),
+        )
+        .with(ListFiles::new(workdir.clone()))
+        .with(
+            Grep::new(workdir.clone())
+                .max_matches(config.grep_max_matches)
+                .max_result_bytes(max),
+        )
+        .with(
+            FindFiles::new(workdir.clone())
+                .max_results(config.find_max_results)
+                .max_result_bytes(max),
+        )
+        .with(
+            Shell::new(workdir.clone())
+                .blocked_commands(config.shell_blocked_commands)
+                .max_result_bytes(max),
+        )
+        .with_if(
+            std::env::var("BRAVE_SEARCH_KEY").is_ok(),
+            WebSearch::new().max_result_bytes(max),
+        )
+        .with(EditFile::new(workdir.clone(), tracker.clone()))
+        .with(WriteFile::new(workdir, tracker))
+        .with(ThinkTool)
+        .with(TodoTool::new())
     }
 
     /// Whether a tool's results are cacheable (read-only, deterministic).
@@ -1065,12 +1081,14 @@ mod tests {
     #[test]
     fn with_common_tools_registers_all() {
         let set = ToolSet::new().with_common_tools("/tmp");
-        // 5 common tools + think + todo = 7
-        assert_eq!(set.len(), 7);
+        // 5 common tools + edit_file + write_file + think + todo = 9
+        assert_eq!(set.len(), 9);
 
         let defs = set.definitions();
         let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
         assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"edit_file".to_string()));
+        assert!(names.contains(&"write_file".to_string()));
         assert!(names.contains(&"list_files".to_string()));
         assert!(names.contains(&"grep".to_string()));
         assert!(names.contains(&"find_files".to_string()));
@@ -1084,7 +1102,7 @@ mod tests {
         let set = ToolSet::new()
             .with_max_result_bytes(5000)
             .with_common_tools("/tmp");
-        assert_eq!(set.len(), 7);
+        assert_eq!(set.len(), 9);
         // The ToolSet's own max_result_bytes is set.
         assert_eq!(set.max_result_bytes, 5000);
     }
@@ -1092,7 +1110,7 @@ mod tests {
     #[test]
     fn with_common_tools_composable_with_custom_tools() {
         let set = ToolSet::new().with_common_tools("/tmp").with(EchoTool);
-        assert_eq!(set.len(), 8);
+        assert_eq!(set.len(), 10);
     }
 
     #[test]
@@ -1234,17 +1252,21 @@ mod tests {
         let set = ToolSet::new().with(EchoTool);
         let full = set.definitions();
         let compact = set.compact_definitions();
-        assert_eq!(full[0].function.description, compact[0].function.description);
+        assert_eq!(
+            full[0].function.description,
+            compact[0].function.description
+        );
     }
 
     #[test]
     fn extended_description_by_name() {
         let set = ToolSet::new().with(ExtendedTool).with(EchoTool);
         assert!(set.extended_description("extended").is_some());
-        assert!(set
-            .extended_description("extended")
-            .unwrap()
-            .contains("When to use"));
+        assert!(
+            set.extended_description("extended")
+                .unwrap()
+                .contains("When to use")
+        );
         assert!(set.extended_description("echo").is_none());
         assert!(set.extended_description("nonexistent").is_none());
     }
@@ -1253,12 +1275,14 @@ mod tests {
     fn with_common_tools_configured_registers_all() {
         let config = CommonToolsConfig::default().grep_max_matches(500);
         let set = ToolSet::new().with_common_tools_configured("/tmp", config);
-        // Same 7 tools as with_common_tools.
-        assert_eq!(set.len(), 7);
+        // Same 9 tools as with_common_tools.
+        assert_eq!(set.len(), 9);
 
         let defs = set.definitions();
         let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
         assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"edit_file".to_string()));
+        assert!(names.contains(&"write_file".to_string()));
         assert!(names.contains(&"grep".to_string()));
         assert!(names.contains(&"shell".to_string()));
         assert!(names.contains(&"think".to_string()));

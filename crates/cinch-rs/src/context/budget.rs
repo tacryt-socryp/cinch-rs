@@ -129,7 +129,8 @@ impl ContextBudget {
     /// Usage percentage is computed against [`effective_max_tokens()`](Self::effective_max_tokens)
     /// rather than raw `max_tokens`, so thresholds account for output and system reserves.
     pub fn estimate_usage(&self, messages: &[Message]) -> ContextUsage {
-        let system_tokens = (self.system_prompt_chars as f64 / self.chars_per_token).ceil() as usize;
+        let system_tokens =
+            (self.system_prompt_chars as f64 / self.chars_per_token).ceil() as usize;
         let message_total: usize = messages
             .iter()
             .map(|m| message_tokens(m, self.chars_per_token))

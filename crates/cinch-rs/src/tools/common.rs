@@ -10,6 +10,8 @@
 //! | Tool | Name | Purpose |
 //! |------|------|---------|
 //! | [`ReadFile`] | `read_file` | Read a single file |
+//! | [`EditFile`] | `edit_file` | Edit a file by replacing an exact string |
+//! | [`WriteFile`] | `write_file` | Create or overwrite a file |
 //! | [`ListFiles`] | `list_files` | List a directory |
 //! | [`Grep`] | `grep` | Regex search in files |
 //! | [`FindFiles`] | `find_files` | Glob-based file search |
@@ -50,6 +52,8 @@ pub const DEFAULT_MAX_FIND_RESULTS: u32 = 100;
 pub const DEFAULT_BLOCKED_COMMANDS: &[&str] = &["rm -rf /", "mkfs", "> /dev/"];
 
 use crate::tools::core::{DEFAULT_MAX_RESULT_BYTES, truncate_result};
+use crate::tools::read_tracker::ReadTracker;
+use std::sync::Arc;
 
 // ── Typed argument structs ──────────────────────────────────────────
 
@@ -107,6 +111,29 @@ pub struct WebSearchArgs {
     pub count: Option<u32>,
 }
 
+/// Typed arguments for `edit_file`.
+#[derive(Deserialize, JsonSchema)]
+pub struct EditFileArgs {
+    /// File path relative to repo root (e.g. 'src/main.rs').
+    pub path: String,
+    /// Exact text to find in the file.
+    pub old_string: String,
+    /// Replacement text.
+    pub new_string: String,
+    /// Replace all occurrences instead of requiring uniqueness. Default: false.
+    #[serde(default)]
+    pub replace_all: Option<bool>,
+}
+
+/// Typed arguments for `write_file`.
+#[derive(Deserialize, JsonSchema)]
+pub struct WriteFileArgs {
+    /// File path relative to repo root (e.g. 'src/new_module.rs').
+    pub path: String,
+    /// Full file content to write.
+    pub content: String,
+}
+
 // ── ReadFile ────────────────────────────────────────────────────────
 
 /// Read a file from a working directory.
@@ -116,6 +143,7 @@ pub struct WebSearchArgs {
 pub struct ReadFile {
     workdir: String,
     max_result_bytes: usize,
+    tracker: Option<Arc<ReadTracker>>,
 }
 
 impl ReadFile {
@@ -123,11 +151,19 @@ impl ReadFile {
         Self {
             workdir: workdir.into(),
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
+            tracker: None,
         }
     }
 
     pub fn max_result_bytes(mut self, max: usize) -> Self {
         self.max_result_bytes = max;
+        self
+    }
+
+    /// Attach a [`ReadTracker`] so successful reads are recorded for
+    /// read-before-write enforcement.
+    pub fn with_tracker(mut self, tracker: Arc<ReadTracker>) -> Self {
+        self.tracker = Some(tracker);
         self
     }
 }
@@ -163,6 +199,7 @@ impl Tool for ReadFile {
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
         let workdir = self.workdir.clone();
         let max = self.max_result_bytes;
+        let tracker = self.tracker.clone();
         let arguments = arguments.to_string();
         Box::pin(async move {
             let args: ReadFileArgs = match serde_json::from_str(&arguments) {
@@ -187,7 +224,13 @@ impl Tool for ReadFile {
             }
 
             match fs::read_to_string(&full_path).await {
-                Ok(content) => truncate_result(content, max),
+                Ok(content) => {
+                    // Register the read with full (untruncated) content.
+                    if let Some(ref t) = tracker {
+                        t.record_read(&full_path.to_string_lossy(), &content);
+                    }
+                    truncate_result(content, max)
+                }
                 Err(e) => format!("Error reading '{}': {e}", full_path.display()),
             }
         })
@@ -699,6 +742,257 @@ fn format_brave_results(body: &serde_json::Value) -> String {
     out.join("\n\n")
 }
 
+// ── EditFile ──────────────────────────────────────────────────────
+
+/// Edit a file by replacing an exact string.
+///
+/// Requires the file to have been read with `read_file` first
+/// (enforced via [`ReadTracker`]).
+pub struct EditFile {
+    workdir: String,
+    tracker: Arc<ReadTracker>,
+}
+
+impl EditFile {
+    pub fn new(workdir: impl Into<String>, tracker: Arc<ReadTracker>) -> Self {
+        Self {
+            workdir: workdir.into(),
+            tracker,
+        }
+    }
+}
+
+impl Tool for EditFile {
+    fn definition(&self) -> ToolDef {
+        ToolSpec::builder("edit_file")
+            .purpose("Edit a file by replacing an exact string")
+            .when_to_use(
+                "When you need to make a targeted change to a file you have already read with read_file. \
+                 Prefer this over write_file for modifying existing content",
+            )
+            .when_not_to_use(
+                "When creating a new file — use write_file instead. \
+                 When you haven't read the file yet — call read_file first",
+            )
+            .parameters_for::<EditFileArgs>()
+            .example(
+                "edit_file(path='src/main.rs', old_string='fn foo()', new_string='fn bar()')",
+                "Edited src/main.rs: replaced 1 occurrence (line 42)",
+            )
+            .output_format("Confirmation with file path, count, and affected line numbers")
+            .disambiguate(
+                "Creating a brand-new file",
+                "write_file",
+                "write_file creates or overwrites; edit_file modifies existing content in-place",
+            )
+            .build()
+            .to_tool_def()
+    }
+
+    fn is_mutation(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, arguments: &str) -> ToolFuture<'_> {
+        let workdir = self.workdir.clone();
+        let tracker = self.tracker.clone();
+        let arguments = arguments.to_string();
+        Box::pin(async move {
+            let args: EditFileArgs = match serde_json::from_str(&arguments) {
+                Ok(a) => a,
+                Err(_) => {
+                    return "Error: 'path', 'old_string', and 'new_string' are required".to_string();
+                }
+            };
+            if args.path.contains("..") {
+                return "Error: path traversal not allowed".to_string();
+            }
+
+            let full_path = Path::new(&workdir).join(&args.path);
+            let abs_path = full_path.to_string_lossy().to_string();
+
+            // Read-before-write enforcement.
+            if full_path.exists() && !tracker.has_been_read(&abs_path) {
+                return "Error: You must read this file before editing it. \
+                        Use read_file first."
+                    .to_string();
+            }
+
+            // Read current content.
+            let content = match fs::read_to_string(&full_path).await {
+                Ok(c) => c,
+                Err(e) => return format!("Error reading '{}': {e}", args.path),
+            };
+
+            let replace_all = args.replace_all.unwrap_or(false);
+
+            // Count occurrences.
+            let count = content.matches(&args.old_string).count();
+
+            if count == 0 {
+                return format!(
+                    "Error: old_string not found in {}. \
+                     Verify the exact text (including whitespace and indentation).",
+                    args.path
+                );
+            }
+
+            if count > 1 && !replace_all {
+                // Report line numbers of each match.
+                let line_nums: Vec<usize> = content
+                    .match_indices(&args.old_string)
+                    .map(|(byte_offset, _)| content[..byte_offset].lines().count().max(1))
+                    .collect();
+                return format!(
+                    "Error: old_string found {count} times in {} (lines: {}). \
+                     Provide more surrounding context to make it unique, or set replace_all=true.",
+                    args.path,
+                    line_nums
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            // Perform replacement.
+            let new_content = if replace_all {
+                content.replace(&args.old_string, &args.new_string)
+            } else {
+                content.replacen(&args.old_string, &args.new_string, 1)
+            };
+
+            // Write back.
+            if let Err(e) = fs::write(&full_path, &new_content).await {
+                return format!("Error writing '{}': {e}", args.path);
+            }
+
+            // Update tracker so subsequent edits don't require re-reading.
+            tracker.record_write(&abs_path, &new_content);
+
+            // Calculate affected line range for the first occurrence.
+            let start_byte = content.find(&args.old_string).unwrap();
+            let start_line = content[..start_byte].lines().count().max(1);
+            let end_line = start_line + args.old_string.lines().count().saturating_sub(1);
+
+            if replace_all && count > 1 {
+                format!("Edited {}: replaced {count} occurrences", args.path)
+            } else if start_line == end_line {
+                format!(
+                    "Edited {}: replaced 1 occurrence (line {start_line})",
+                    args.path
+                )
+            } else {
+                format!(
+                    "Edited {}: replaced 1 occurrence (lines {start_line}-{end_line})",
+                    args.path
+                )
+            }
+        })
+    }
+}
+
+// ── WriteFile ─────────────────────────────────────────────────────
+
+/// Create a new file or overwrite an existing file.
+///
+/// Existing files require a prior `read_file` call (enforced via
+/// [`ReadTracker`]). New files can be written without reading first.
+pub struct WriteFile {
+    workdir: String,
+    tracker: Arc<ReadTracker>,
+}
+
+impl WriteFile {
+    pub fn new(workdir: impl Into<String>, tracker: Arc<ReadTracker>) -> Self {
+        Self {
+            workdir: workdir.into(),
+            tracker,
+        }
+    }
+}
+
+impl Tool for WriteFile {
+    fn definition(&self) -> ToolDef {
+        ToolSpec::builder("write_file")
+            .purpose("Create a new file or overwrite an existing file")
+            .when_to_use(
+                "When creating a brand-new file, or when you need to replace an entire \
+                 file's content. You must have read the file first if it already exists",
+            )
+            .when_not_to_use(
+                "When making a small targeted change to an existing file — \
+                 use edit_file instead (avoids rewriting unchanged content)",
+            )
+            .parameters_for::<WriteFileArgs>()
+            .example(
+                "write_file(path='src/new_module.rs', content='pub mod foo;\\n')",
+                "Wrote 1 line to src/new_module.rs",
+            )
+            .output_format("Confirmation with line count and file path")
+            .disambiguate(
+                "Changing a few lines in an existing file",
+                "edit_file",
+                "edit_file is more precise for targeted changes; write_file replaces the whole file",
+            )
+            .build()
+            .to_tool_def()
+    }
+
+    fn is_mutation(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, arguments: &str) -> ToolFuture<'_> {
+        let workdir = self.workdir.clone();
+        let tracker = self.tracker.clone();
+        let arguments = arguments.to_string();
+        Box::pin(async move {
+            let args: WriteFileArgs = match serde_json::from_str(&arguments) {
+                Ok(a) => a,
+                Err(_) => return "Error: 'path' and 'content' arguments are required".to_string(),
+            };
+            if args.path.contains("..") {
+                return "Error: path traversal not allowed".to_string();
+            }
+
+            let full_path = Path::new(&workdir).join(&args.path);
+            let abs_path = full_path.to_string_lossy().to_string();
+
+            // Read-before-overwrite: only enforce for existing files.
+            let file_exists = fs::metadata(&full_path).await.is_ok();
+            if file_exists && !tracker.has_been_read(&abs_path) {
+                return "Error: You must read this file before overwriting it. \
+                        Use read_file first."
+                    .to_string();
+            }
+
+            // Create parent directories if needed.
+            if let Some(parent) = full_path.parent()
+                && !parent.exists()
+                && let Err(e) = fs::create_dir_all(parent).await
+            {
+                return format!("Error creating directories for '{}': {e}", args.path);
+            }
+
+            // Write the file.
+            if let Err(e) = fs::write(&full_path, &args.content).await {
+                return format!("Error writing '{}': {e}", args.path);
+            }
+
+            // Update tracker with the written content.
+            tracker.record_write(&abs_path, &args.content);
+
+            let line_count = args.content.lines().count();
+            format!(
+                "Wrote {line_count} line{} to {}",
+                if line_count == 1 { "" } else { "s" },
+                args.path
+            )
+        })
+    }
+}
+
 // ── Shared helpers ──────────────────────────────────────────────────
 
 /// Parse a JSON arguments string, returning an empty object on failure.
@@ -956,5 +1250,264 @@ mod tests {
         let schema = crate::json_schema_for::<ShellArgs>();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::json!("command")));
+    }
+
+    // ── EditFile tests ─────────────────────────────────────────────
+
+    fn make_tracker() -> Arc<ReadTracker> {
+        Arc::new(ReadTracker::new())
+    }
+
+    #[tokio::test]
+    async fn edit_file_requires_prior_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let tracker = make_tracker();
+        let tool = EditFile::new(dir.path().to_str().unwrap(), tracker);
+        let result = tool
+            .execute(r#"{"path": "test.rs", "old_string": "main", "new_string": "start"}"#)
+            .await;
+        assert!(
+            result.contains("must read this file before editing"),
+            "expected enforcement error, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_succeeds_after_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let tracker = make_tracker();
+        let read_tool = ReadFile::new(dir.path().to_str().unwrap()).with_tracker(tracker.clone());
+        let edit_tool = EditFile::new(dir.path().to_str().unwrap(), tracker);
+
+        // Read first.
+        read_tool.execute(r#"{"path": "test.rs"}"#).await;
+
+        // Then edit.
+        let result = edit_tool
+            .execute(r#"{"path": "test.rs", "old_string": "main", "new_string": "start"}"#)
+            .await;
+        assert!(
+            result.contains("Edited test.rs"),
+            "expected success, got: {result}"
+        );
+        assert!(result.contains("replaced 1 occurrence"));
+
+        // Verify file was actually changed.
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "fn start() {}");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_ambiguous_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "foo\nbar\nfoo\n").unwrap();
+
+        let tracker = make_tracker();
+        let abs_path = file.to_string_lossy().to_string();
+        tracker.record_read(&abs_path, "foo\nbar\nfoo\n");
+
+        let tool = EditFile::new(dir.path().to_str().unwrap(), tracker);
+        let result = tool
+            .execute(r#"{"path": "test.rs", "old_string": "foo", "new_string": "baz"}"#)
+            .await;
+        assert!(
+            result.contains("found 2 times"),
+            "expected ambiguity error, got: {result}"
+        );
+        assert!(result.contains("lines:"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_replace_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "foo\nbar\nfoo\n").unwrap();
+
+        let tracker = make_tracker();
+        let abs_path = file.to_string_lossy().to_string();
+        tracker.record_read(&abs_path, "foo\nbar\nfoo\n");
+
+        let tool = EditFile::new(dir.path().to_str().unwrap(), tracker);
+        let result = tool
+            .execute(
+                r#"{"path": "test.rs", "old_string": "foo", "new_string": "baz", "replace_all": true}"#,
+            )
+            .await;
+        assert!(
+            result.contains("replaced 2 occurrences"),
+            "expected replace_all success, got: {result}"
+        );
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "baz\nbar\nbaz\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_not_found_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let tracker = make_tracker();
+        let abs_path = file.to_string_lossy().to_string();
+        tracker.record_read(&abs_path, "fn main() {}");
+
+        let tool = EditFile::new(dir.path().to_str().unwrap(), tracker);
+        let result = tool
+            .execute(r#"{"path": "test.rs", "old_string": "nonexistent", "new_string": "x"}"#)
+            .await;
+        assert!(
+            result.contains("old_string not found"),
+            "expected not-found error, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_allows_subsequent_edit_without_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "aaa bbb ccc").unwrap();
+
+        let tracker = make_tracker();
+        let read_tool = ReadFile::new(dir.path().to_str().unwrap()).with_tracker(tracker.clone());
+        let edit_tool = EditFile::new(dir.path().to_str().unwrap(), tracker);
+
+        // Read, then edit twice without re-reading.
+        read_tool.execute(r#"{"path": "test.rs"}"#).await;
+
+        let r1 = edit_tool
+            .execute(r#"{"path": "test.rs", "old_string": "aaa", "new_string": "xxx"}"#)
+            .await;
+        assert!(r1.contains("Edited"), "first edit failed: {r1}");
+
+        let r2 = edit_tool
+            .execute(r#"{"path": "test.rs", "old_string": "bbb", "new_string": "yyy"}"#)
+            .await;
+        assert!(r2.contains("Edited"), "second edit failed: {r2}");
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "xxx yyy ccc");
+    }
+
+    #[tokio::test]
+    async fn edit_file_blocks_path_traversal() {
+        let tracker = make_tracker();
+        let tool = EditFile::new("/tmp", tracker);
+        let result = tool
+            .execute(r#"{"path": "../../../etc/passwd", "old_string": "x", "new_string": "y"}"#)
+            .await;
+        assert_eq!(result, "Error: path traversal not allowed");
+    }
+
+    // ── WriteFile tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_file_creates_new_without_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = make_tracker();
+        let tool = WriteFile::new(dir.path().to_str().unwrap(), tracker);
+
+        let result = tool
+            .execute(r#"{"path": "new.rs", "content": "pub fn hello() {}\n"}"#)
+            .await;
+        assert!(result.contains("Wrote"), "expected success, got: {result}");
+
+        let content = std::fs::read_to_string(dir.path().join("new.rs")).unwrap();
+        assert!(content.contains("pub fn hello()"));
+    }
+
+    #[tokio::test]
+    async fn write_file_requires_read_for_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("existing.rs");
+        std::fs::write(&file, "old content").unwrap();
+
+        let tracker = make_tracker();
+        let tool = WriteFile::new(dir.path().to_str().unwrap(), tracker);
+
+        let result = tool
+            .execute(r#"{"path": "existing.rs", "content": "new content"}"#)
+            .await;
+        assert!(
+            result.contains("must read this file before overwriting"),
+            "expected enforcement error, got: {result}"
+        );
+
+        // File should be unchanged.
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "old content");
+    }
+
+    #[tokio::test]
+    async fn write_file_succeeds_after_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("existing.rs");
+        std::fs::write(&file, "old content").unwrap();
+
+        let tracker = make_tracker();
+        let read_tool = ReadFile::new(dir.path().to_str().unwrap()).with_tracker(tracker.clone());
+        let write_tool = WriteFile::new(dir.path().to_str().unwrap(), tracker);
+
+        read_tool.execute(r#"{"path": "existing.rs"}"#).await;
+
+        let result = write_tool
+            .execute(r#"{"path": "existing.rs", "content": "new content"}"#)
+            .await;
+        assert!(result.contains("Wrote"), "expected success, got: {result}");
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "new content");
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = make_tracker();
+        let tool = WriteFile::new(dir.path().to_str().unwrap(), tracker);
+
+        let result = tool
+            .execute(r#"{"path": "deep/nested/dir/file.rs", "content": "hello"}"#)
+            .await;
+        assert!(result.contains("Wrote"), "expected success, got: {result}");
+
+        let content = std::fs::read_to_string(dir.path().join("deep/nested/dir/file.rs")).unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    #[tokio::test]
+    async fn write_file_blocks_path_traversal() {
+        let tracker = make_tracker();
+        let tool = WriteFile::new("/tmp", tracker);
+        let result = tool
+            .execute(r#"{"path": "../../../tmp/evil.sh", "content": "bad"}"#)
+            .await;
+        assert_eq!(result, "Error: path traversal not allowed");
+    }
+
+    #[test]
+    fn edit_file_definition_has_tool_spec_fields() {
+        let tracker = make_tracker();
+        let tool = EditFile::new("/tmp", tracker);
+        let def = tool.definition();
+        assert_eq!(def.function.name, "edit_file");
+        assert!(def.function.description.contains("When to use:"));
+        assert!(def.function.description.contains("When NOT to use:"));
+    }
+
+    #[test]
+    fn write_file_definition_has_tool_spec_fields() {
+        let tracker = make_tracker();
+        let tool = WriteFile::new("/tmp", tracker);
+        let def = tool.definition();
+        assert_eq!(def.function.name, "write_file");
+        assert!(def.function.description.contains("When to use:"));
+        assert!(def.function.description.contains("When NOT to use:"));
     }
 }

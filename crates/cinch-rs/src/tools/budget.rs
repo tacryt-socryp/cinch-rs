@@ -188,16 +188,16 @@ mod tests {
 
     #[test]
     fn enforce_budget_under_limit() {
-        let tools = vec![
-            make_tool("a", "short"),
-            make_tool("b", "also short"),
-        ];
+        let tools = vec![make_tool("a", "short"), make_tool("b", "also short")];
         let budget = ToolBudget {
             max_tokens: 10_000,
             ..Default::default()
         };
         let (result, report) = enforce_budget(&tools, &budget);
-        assert!(report.is_none(), "should not produce a report when under budget");
+        assert!(
+            report.is_none(),
+            "should not produce a report when under budget"
+        );
         assert_eq!(result.len(), tools.len());
         assert_eq!(result[0].function.description, "short");
         assert_eq!(result[1].function.description, "also short");
@@ -255,7 +255,10 @@ mod tests {
         };
         let (result, _) = enforce_budget(&tools, &budget);
         assert!(
-            result[0].function.description.ends_with("[description truncated]"),
+            result[0]
+                .function
+                .description
+                .ends_with("[description truncated]"),
             "truncated description should end with marker, got: {}",
             result[0].function.description,
         );

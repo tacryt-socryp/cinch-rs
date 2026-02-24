@@ -18,8 +18,11 @@
 //!
 //! - [`core`] — [`Tool`] trait, [`ToolSet`], [`FnTool`], [`DisabledTool`],
 //!   pseudo-tools ([`ThinkTool`], [`TodoTool`]).
-//! - [`common`] — built-in tools: `ReadFile`, `ListFiles`, `Grep`, `FindFiles`,
-//!   `Shell`. Register all at once with [`ToolSet::with_common_tools()`].
+//! - [`common`] — built-in tools: `ReadFile`, `EditFile`, `WriteFile`,
+//!   `ListFiles`, `Grep`, `FindFiles`, `Shell`. Register all at once with
+//!   [`ToolSet::with_common_tools()`].
+//! - [`read_tracker`] — [`ReadTracker`] for read-before-write enforcement
+//!   shared between `ReadFile`, `EditFile`, and `WriteFile`.
 //! - [`spec`] — [`ToolSpec`](spec::ToolSpec) builder for structured tool
 //!   descriptions with `when_to_use` / `when_not_to_use` guidance.
 //! - [`filter`] — [`ToolFilter`] for dynamic tool selection by category,
@@ -34,15 +37,17 @@ pub mod common;
 pub mod core;
 pub mod dag;
 pub mod filter;
+pub mod read_tracker;
 pub mod reflection;
 pub mod spec;
 
 // Re-export commonly used items at the module level.
+pub use budget::ToolBudget;
 pub use core::{
     CommonToolsConfig, DisabledTool, FnTool, ThinkTool, TodoTool, Tool, ToolFuture, ToolSet,
 };
 pub use core::{
     DEFAULT_MAX_RESULT_BYTES, parse_tool_args, truncate_result, validate_tool_arguments,
 };
-pub use budget::ToolBudget;
 pub use filter::{ToolCategory, ToolFilter};
+pub use read_tracker::ReadTracker;

@@ -361,9 +361,7 @@ impl EventHandler for ExternalHookRunner {
             HarnessEvent::ApprovalRequired { name, arguments } => {
                 self.run_pre_tool_hooks(name, arguments)
             }
-            HarnessEvent::ToolResult { name, result, .. } => {
-                self.run_post_tool_hooks(name, result)
-            }
+            HarnessEvent::ToolResult { name, result, .. } => self.run_post_tool_hooks(name, result),
             HarnessEvent::SessionStarting { trace_id } => {
                 self.run_session_start_hooks(trace_id);
                 None
@@ -492,9 +490,11 @@ mod tests {
     fn adapter_ignores_irrelevant_events() {
         let adapter = LifecycleHookAdapter::new(BlockingHook);
         assert!(adapter.on_event(&HarnessEvent::Text("hello")).is_none());
-        assert!(adapter
-            .on_event(&HarnessEvent::RoundLimitReached { max_rounds: 10 })
-            .is_none());
+        assert!(
+            adapter
+                .on_event(&HarnessEvent::RoundLimitReached { max_rounds: 10 })
+                .is_none()
+        );
     }
 
     // ── Session lifecycle adapter tests ────────────────────────────
@@ -528,9 +528,7 @@ mod tests {
             ended: ended.clone(),
         });
 
-        let event = HarnessEvent::SessionStarting {
-            trace_id: "tr-123",
-        };
+        let event = HarnessEvent::SessionStarting { trace_id: "tr-123" };
         let response = adapter.on_event(&event);
         assert!(response.is_none());
         assert_eq!(started.lock().unwrap().len(), 1);
@@ -659,7 +657,9 @@ mod tests {
             arguments: "{}",
         };
         let response = runner.on_event(&event);
-        assert!(matches!(response, Some(EventResponse::Deny(ref r)) if r.contains("blocked by hook")));
+        assert!(
+            matches!(response, Some(EventResponse::Deny(ref r)) if r.contains("blocked by hook"))
+        );
     }
 
     #[test]

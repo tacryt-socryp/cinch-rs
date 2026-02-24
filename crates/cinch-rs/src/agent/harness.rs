@@ -233,10 +233,9 @@ impl<'a> Harness<'a> {
         }
 
         // ── Emit SessionStarting ──
-        self.event_handler
-            .on_event(&HarnessEvent::SessionStarting {
-                trace_id: &acc.trace_id,
-            });
+        self.event_handler.on_event(&HarnessEvent::SessionStarting {
+            trace_id: &acc.trace_id,
+        });
 
         // Auto-calibrate context budget from the system message if no
         // explicit budget was provided via `with_context_budget()`.
@@ -284,24 +283,24 @@ impl<'a> Harness<'a> {
         };
 
         // ── Apply tool definition budget ──
-        let (full_tool_defs, planning_tool_defs) =
-            if let Some(ref budget) = self.config.tool_budget {
-                let (trimmed_full, report) =
-                    crate::tools::budget::enforce_budget(&full_tool_defs, budget);
-                if let Some(ref r) = report {
-                    self.event_handler
-                        .on_event(&HarnessEvent::ToolDefinitionsBudgeted {
-                            original_tokens: r.original_tokens,
-                            trimmed_tokens: r.trimmed_tokens,
-                            truncated_count: r.truncated_count,
-                        });
-                }
-                let (trimmed_plan, _) =
-                    crate::tools::budget::enforce_budget(&planning_tool_defs, budget);
-                (trimmed_full, trimmed_plan)
-            } else {
-                (full_tool_defs, planning_tool_defs)
-            };
+        let (full_tool_defs, planning_tool_defs) = if let Some(ref budget) = self.config.tool_budget
+        {
+            let (trimmed_full, report) =
+                crate::tools::budget::enforce_budget(&full_tool_defs, budget);
+            if let Some(ref r) = report {
+                self.event_handler
+                    .on_event(&HarnessEvent::ToolDefinitionsBudgeted {
+                        original_tokens: r.original_tokens,
+                        trimmed_tokens: r.trimmed_tokens,
+                        truncated_count: r.truncated_count,
+                    });
+            }
+            let (trimmed_plan, _) =
+                crate::tools::budget::enforce_budget(&planning_tool_defs, budget);
+            (trimmed_full, trimmed_plan)
+        } else {
+            (full_tool_defs, planning_tool_defs)
+        };
 
         // ── Initialize ContextLayout ──
         // The initial messages (system prompt + user task) become the pinned prefix.
@@ -1390,8 +1389,7 @@ mod tests {
 
     #[test]
     fn progressive_tools_builder() {
-        let config =
-            HarnessConfig::new("test-model", "prompt").with_progressive_tools(true);
+        let config = HarnessConfig::new("test-model", "prompt").with_progressive_tools(true);
         assert!(config.progressive_tools);
     }
 

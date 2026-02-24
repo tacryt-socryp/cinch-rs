@@ -32,8 +32,8 @@ pub use crate::context::ContextBudget;
 // ── Tools ───────────────────────────────────────────────────────────
 pub use crate::tools::spec::ToolSpec;
 pub use crate::tools::{
-    CommonToolsConfig, DisabledTool, FnTool, Tool, ToolCategory, ToolFilter, ToolFuture, ToolSet,
-    parse_tool_args,
+    CommonToolsConfig, DisabledTool, FnTool, ReadTracker, Tool, ToolCategory, ToolFilter,
+    ToolFuture, ToolSet, parse_tool_args,
 };
 
 // ── UI state ────────────────────────────────────────────────────────
