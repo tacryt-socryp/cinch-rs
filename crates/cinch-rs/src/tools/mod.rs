@@ -28,6 +28,7 @@
 //! - [`dag`] — dependency-aware parallel execution with topological ordering.
 //! - [`reflection`] — structured error formatting for LLM self-correction.
 
+pub mod budget;
 pub mod cache;
 pub mod common;
 pub mod core;
@@ -43,4 +44,5 @@ pub use core::{
 pub use core::{
     DEFAULT_MAX_RESULT_BYTES, parse_tool_args, truncate_result, validate_tool_arguments,
 };
+pub use budget::ToolBudget;
 pub use filter::{ToolCategory, ToolFilter};

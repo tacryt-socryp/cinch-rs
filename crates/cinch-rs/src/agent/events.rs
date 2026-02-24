@@ -105,6 +105,12 @@ pub enum HarnessEvent<'a> {
         lines_before: usize,
         lines_after: usize,
     },
+    /// Tool definitions were trimmed to fit within the token budget.
+    ToolDefinitionsBudgeted {
+        original_tokens: usize,
+        trimmed_tokens: usize,
+        truncated_count: usize,
+    },
 }
 
 impl HarnessEvent<'_> {
@@ -635,6 +641,16 @@ impl EventHandler for LoggingHandler {
                 lines_after,
             } => {
                 info!("Memory consolidated: {lines_before} → {lines_after} lines");
+            }
+            HarnessEvent::ToolDefinitionsBudgeted {
+                original_tokens,
+                trimmed_tokens,
+                truncated_count,
+            } => {
+                info!(
+                    "Tool definitions budgeted: {original_tokens} → {trimmed_tokens} tokens \
+                     ({truncated_count} truncated)"
+                );
             }
         }
         None

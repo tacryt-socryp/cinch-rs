@@ -317,6 +317,18 @@ impl EventHandler for WebBroadcastHandler {
                     phase: format!("Memory consolidated: {lines_before} → {lines_after} lines"),
                 });
             }
+            HarnessEvent::ToolDefinitionsBudgeted {
+                original_tokens,
+                trimmed_tokens,
+                truncated_count,
+            } => {
+                self.broadcast(WsMessage::Phase {
+                    phase: format!(
+                        "Tool definitions budgeted: {original_tokens} → {trimmed_tokens} tokens \
+                         ({truncated_count} truncated)"
+                    ),
+                });
+            }
         }
         None // Never controls flow.
     }

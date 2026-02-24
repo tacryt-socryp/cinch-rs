@@ -265,6 +265,10 @@ pub struct HarnessConfig {
     /// When set, the prompt is injected into the system message and
     /// compaction instructions are forwarded to the summarizer.
     pub project_instructions: Option<ProjectInstructions>,
+    /// Tool definition budget. When `Some`, the harness trims tool
+    /// descriptions to fit within the token limit before each API request.
+    /// Default: `None` (no budget enforcement).
+    pub tool_budget: Option<crate::tools::ToolBudget>,
 }
 
 impl HarnessConfig {
@@ -415,6 +419,12 @@ impl HarnessConfig {
         self
     }
 
+    /// Set a tool definition budget.
+    pub fn with_tool_budget(mut self, budget: crate::tools::ToolBudget) -> Self {
+        self.tool_budget = Some(budget);
+        self
+    }
+
     /// Set project instructions directly.
     ///
     /// If the instructions contain compaction instructions, they are
@@ -454,6 +464,7 @@ impl Default for HarnessConfig {
             output_schema: None,
             memory_config: MemoryConfig::default(),
             project_instructions: None,
+            tool_budget: None,
         }
     }
 }

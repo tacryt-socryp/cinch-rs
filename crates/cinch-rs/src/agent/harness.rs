@@ -272,6 +272,26 @@ impl<'a> Harness<'a> {
             Vec::new()
         };
 
+        // ── Apply tool definition budget ──
+        let (full_tool_defs, planning_tool_defs) =
+            if let Some(ref budget) = self.config.tool_budget {
+                let (trimmed_full, report) =
+                    crate::tools::budget::enforce_budget(&full_tool_defs, budget);
+                if let Some(ref r) = report {
+                    self.event_handler
+                        .on_event(&HarnessEvent::ToolDefinitionsBudgeted {
+                            original_tokens: r.original_tokens,
+                            trimmed_tokens: r.trimmed_tokens,
+                            truncated_count: r.truncated_count,
+                        });
+                }
+                let (trimmed_plan, _) =
+                    crate::tools::budget::enforce_budget(&planning_tool_defs, budget);
+                (trimmed_full, trimmed_plan)
+            } else {
+                (full_tool_defs, planning_tool_defs)
+            };
+
         // ── Initialize ContextLayout ──
         // The initial messages (system prompt + user task) become the pinned prefix.
         // All subsequent messages flow through the layout's zone management.
