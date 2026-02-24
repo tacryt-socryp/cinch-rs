@@ -27,6 +27,7 @@ pub mod events;
 pub mod execution;
 pub mod gather;
 pub mod harness;
+pub mod hooks;
 pub mod memory;
 pub mod plan_execute;
 pub mod project_instructions;
@@ -43,6 +44,10 @@ pub use events::{
 };
 pub use gather::{ContextGatherer, GatherEvent, GatherObserver, UiGatherObserver};
 pub use harness::Harness;
+pub use hooks::{
+    ExternalHookRunner, HookAction, HookConfig, HookEntry, LifecycleHook, LifecycleHookAdapter,
+    StopAction,
+};
 pub use project_instructions::{ConditionalRule, ProjectInstructions};
 pub use prompt::{
     PromptRegistry, PromptSection, ReminderFrequency, ReminderRegistry, RoundContext, Stability,

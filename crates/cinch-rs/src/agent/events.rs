@@ -111,6 +111,14 @@ pub enum HarnessEvent<'a> {
         trimmed_tokens: usize,
         truncated_count: usize,
     },
+    /// Session is starting (emitted after manifest creation, before first round).
+    SessionStarting { trace_id: &'a str },
+    /// Session is finishing (emitted before finalization, after last round).
+    SessionFinishing {
+        trace_id: &'a str,
+        finished: bool,
+        rounds_used: u32,
+    },
 }
 
 impl HarnessEvent<'_> {
@@ -650,6 +658,18 @@ impl EventHandler for LoggingHandler {
                 info!(
                     "Tool definitions budgeted: {original_tokens} → {trimmed_tokens} tokens \
                      ({truncated_count} truncated)"
+                );
+            }
+            HarnessEvent::SessionStarting { trace_id } => {
+                info!("Session starting: trace_id={trace_id}");
+            }
+            HarnessEvent::SessionFinishing {
+                trace_id,
+                finished,
+                rounds_used,
+            } => {
+                info!(
+                    "Session finishing: trace_id={trace_id}, finished={finished}, rounds={rounds_used}"
                 );
             }
         }

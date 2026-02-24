@@ -232,6 +232,12 @@ impl<'a> Harness<'a> {
             modules.session_manifest = Some(manifest);
         }
 
+        // ── Emit SessionStarting ──
+        self.event_handler
+            .on_event(&HarnessEvent::SessionStarting {
+                trace_id: &acc.trace_id,
+            });
+
         // Auto-calibrate context budget from the system message if no
         // explicit budget was provided via `with_context_budget()`.
         if self.context_budget.is_none()
@@ -570,6 +576,14 @@ impl<'a> Harness<'a> {
                 }
             }
         }
+
+        // ── Emit SessionFinishing ──
+        self.event_handler
+            .on_event(&HarnessEvent::SessionFinishing {
+                trace_id: &acc.trace_id,
+                finished: acc.finished,
+                rounds_used: acc.rounds_used,
+            });
 
         let result = finalize_run(
             &self.config,
