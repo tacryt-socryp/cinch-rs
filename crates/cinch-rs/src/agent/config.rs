@@ -242,6 +242,11 @@ pub struct HarnessConfig {
     /// dependencies are a concern. Default: `false` (parallel with
     /// optional dependency-graph ordering via `depends_on` annotations).
     pub sequential_tools: bool,
+    /// Policy for automatic sequential dependency injection when running
+    /// in parallel mode (`sequential_tools = false`). Controls how
+    /// same-file mutations and shell calls are ordered.
+    /// Default: [`PerFileForMutations`](crate::tools::dag::SequentialPolicy::PerFileForMutations).
+    pub sequential_policy: crate::tools::dag::SequentialPolicy,
     /// Context window size in tokens (for context layout thresholds).
     pub context_window_tokens: usize,
     /// Number of recent messages to keep in the raw recency window.
@@ -434,6 +439,12 @@ impl HarnessConfig {
         self
     }
 
+    /// Set the sequential dependency injection policy for parallel tool execution.
+    pub fn with_sequential_policy(mut self, policy: crate::tools::dag::SequentialPolicy) -> Self {
+        self.sequential_policy = policy;
+        self
+    }
+
     /// Set project instructions directly.
     ///
     /// If the instructions contain compaction instructions, they are
@@ -466,6 +477,7 @@ impl Default for HarnessConfig {
             streaming: false,
             approval_required_tools: Vec::new(),
             sequential_tools: false,
+            sequential_policy: crate::tools::dag::SequentialPolicy::PerFileForMutations,
             context_window_tokens: 200_000,
             keep_recent_messages: 10,
             system_prompt: None,

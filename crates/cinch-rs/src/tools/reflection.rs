@@ -43,7 +43,7 @@ fn analyze_error(tool_name: &str, error: &str) -> Vec<String> {
         || error_lower.contains("does not exist")
     {
         suggestions.push("Check that the file path is correct. Use list_dir or find_files to discover the right path.".into());
-        if tool_name == "read_file" {
+        if tool_name == super::names::READ_FILE {
             suggestions.push(
                 "The file may have been moved or renamed. Try searching with grep or find_files."
                     .into(),

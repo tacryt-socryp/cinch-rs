@@ -90,7 +90,10 @@ pub fn eviction_priority(meta: &ToolResultMeta, current_round: usize) -> f64 {
     let age = (current_round.saturating_sub(meta.round)).max(1) as f64;
     let size_factor = (meta.estimated_tokens.max(1) as f64).ln();
     let tool_factor = match meta.tool_name.as_str() {
-        "read_file" | "grep" | "find_files" | "list_dir" => 1.5,
+        crate::tools::names::READ_FILE
+        | crate::tools::names::GREP
+        | crate::tools::names::FIND_FILES
+        | crate::tools::names::LIST_DIR => 1.5,
         _ => 1.0,
     };
     age * size_factor * tool_factor

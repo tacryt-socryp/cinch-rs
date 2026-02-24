@@ -175,10 +175,10 @@ pub fn annotate_tool_calls_with_policy(
 }
 
 /// Tools whose calls must be sequenced per-file.
-const FILE_MUTATION_TOOLS: &[&str] = &["edit_file", "write_file"];
+const FILE_MUTATION_TOOLS: &[&str] = &[super::names::EDIT_FILE, super::names::WRITE_FILE];
 
 /// Tools that must always run sequentially.
-const ALWAYS_SEQUENTIAL_TOOLS: &[&str] = &["shell"];
+const ALWAYS_SEQUENTIAL_TOOLS: &[&str] = &[super::names::SHELL];
 
 /// Extract the file path from a tool call's arguments JSON.
 ///
@@ -366,12 +366,7 @@ mod tests {
         }
     }
 
-    fn named_call_with_dep(
-        id: &str,
-        name: &str,
-        args: &str,
-        dep: &str,
-    ) -> AnnotatedToolCall {
+    fn named_call_with_dep(id: &str, name: &str, args: &str, dep: &str) -> AnnotatedToolCall {
         AnnotatedToolCall {
             call_id: id.into(),
             name: name.into(),

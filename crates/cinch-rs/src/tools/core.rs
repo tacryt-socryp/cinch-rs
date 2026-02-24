@@ -470,6 +470,13 @@ impl ToolSet {
             &result[..result.len().min(300)]
         );
 
+        // Wrap errors in structured reflection for better LLM self-correction.
+        let result = if result.starts_with("Error:") {
+            super::reflection::format_tool_failure(name, arguments, &result)
+        } else {
+            result
+        };
+
         truncate_result(result, self.max_result_bytes)
     }
 }
@@ -756,7 +763,11 @@ pub enum TruncationStrategy {
 ///   `tail_ratio`, inserting an omission notice in between.
 /// - **HeadLines**: keeps the first N lines regardless of byte size, appending
 ///   a notice with the total line count.
-pub fn truncate_with_strategy(s: String, max_bytes: usize, strategy: &TruncationStrategy) -> String {
+pub fn truncate_with_strategy(
+    s: String,
+    max_bytes: usize,
+    strategy: &TruncationStrategy,
+) -> String {
     match strategy {
         TruncationStrategy::Head => truncate_result(s, max_bytes),
 
@@ -787,14 +798,8 @@ pub fn truncate_with_strategy(s: String, max_bytes: usize, strategy: &Truncation
             if total_lines <= *max_lines {
                 return s;
             }
-            let kept: String = s
-                .lines()
-                .take(*max_lines)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "{kept}\n[truncated: {total_lines} lines, showing first {max_lines}]"
-            )
+            let kept: String = s.lines().take(*max_lines).collect::<Vec<_>>().join("\n");
+            format!("{kept}\n[truncated: {total_lines} lines, showing first {max_lines}]")
         }
     }
 }
@@ -1166,20 +1171,19 @@ mod tests {
     fn head_truncation_matches_existing() {
         let s = "a".repeat(200);
         let via_fn = truncate_result(s.clone(), 50);
-        let via_strategy =
-            truncate_with_strategy(s, 50, &TruncationStrategy::Head);
+        let via_strategy = truncate_with_strategy(s, 50, &TruncationStrategy::Head);
         assert_eq!(via_fn, via_strategy);
     }
 
     #[test]
     fn head_and_tail_preserves_both_ends() {
         let s = format!("{}MIDDLE{}", "A".repeat(100), "Z".repeat(100));
-        let result = truncate_with_strategy(
-            s,
-            100,
-            &TruncationStrategy::HeadAndTail { tail_ratio: 0.4 },
+        let result =
+            truncate_with_strategy(s, 100, &TruncationStrategy::HeadAndTail { tail_ratio: 0.4 });
+        assert!(
+            result.starts_with(&"A".repeat(50)),
+            "head should start with As"
         );
-        assert!(result.starts_with(&"A".repeat(50)), "head should start with As");
         assert!(result.ends_with(&"Z".repeat(40)), "tail should end with Zs");
         assert!(result.contains("omitted"), "should contain omission notice");
     }
@@ -1199,8 +1203,11 @@ mod tests {
     fn head_lines_truncates_at_line_count() {
         let lines: Vec<String> = (1..=20).map(|i| format!("line {i}")).collect();
         let s = lines.join("\n");
-        let result =
-            truncate_with_strategy(s, usize::MAX, &TruncationStrategy::HeadLines { max_lines: 5 });
+        let result = truncate_with_strategy(
+            s,
+            usize::MAX,
+            &TruncationStrategy::HeadLines { max_lines: 5 },
+        );
         assert!(result.starts_with("line 1\n"));
         assert!(result.contains("line 5"));
         assert!(!result.contains("line 6"));
@@ -1210,8 +1217,11 @@ mod tests {
     #[test]
     fn head_lines_short_unchanged() {
         let s = "line 1\nline 2\nline 3".to_string();
-        let result =
-            truncate_with_strategy(s.clone(), usize::MAX, &TruncationStrategy::HeadLines { max_lines: 10 });
+        let result = truncate_with_strategy(
+            s.clone(),
+            usize::MAX,
+            &TruncationStrategy::HeadLines { max_lines: 10 },
+        );
         assert_eq!(result, s);
     }
 

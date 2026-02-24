@@ -171,8 +171,6 @@ impl<'a> Harness<'a> {
             trace_id: crate::api::tracing::generate_trace_id(),
             text_output: Vec::new(),
             annotations: Vec::new(),
-            total_prompt_tokens: 0,
-            total_completion_tokens: 0,
             cost_tracker: crate::api::tracing::CostTracker::new(),
             rounds_used: 0,
             finished: false,
@@ -366,6 +364,7 @@ impl<'a> Harness<'a> {
                 &mut modules.summarizer,
                 &mut modules.tool_metas,
                 &model_for_round,
+                round,
                 self.event_handler,
                 &modules.file_tracker,
             )
@@ -424,8 +423,6 @@ impl<'a> Harness<'a> {
             if let Some(ref u) = completion.usage {
                 let pt = u.prompt_tokens.unwrap_or(0);
                 let ct = u.completion_tokens.unwrap_or(0);
-                acc.total_prompt_tokens += pt;
-                acc.total_completion_tokens += ct;
                 acc.cost_tracker.record(pt, ct, &pricing);
                 self.event_handler.on_event(&HarnessEvent::TokenUsage {
                     prompt_tokens: pt,
@@ -556,16 +553,16 @@ impl<'a> Harness<'a> {
                 &checkpoint_messages,
                 &acc.text_output,
                 round,
-                acc.total_prompt_tokens,
-                acc.total_completion_tokens,
+                acc.cost_tracker.total_prompt_tokens,
+                acc.cost_tracker.total_completion_tokens,
                 acc.cost_tracker.estimated_cost_usd,
                 self.event_handler,
             );
             // Update manifest with latest round/token/cost data.
             if let Some(ref mut manifest) = modules.session_manifest {
                 manifest.last_round = round + 1;
-                manifest.total_prompt_tokens = acc.total_prompt_tokens;
-                manifest.total_completion_tokens = acc.total_completion_tokens;
+                manifest.total_prompt_tokens = acc.cost_tracker.total_prompt_tokens;
+                manifest.total_completion_tokens = acc.cost_tracker.total_completion_tokens;
                 manifest.estimated_cost_usd = acc.cost_tracker.estimated_cost_usd;
                 manifest.updated_at = epoch_secs();
                 if let Some(ref mgr) = modules.session_manager
@@ -654,8 +651,6 @@ struct RunAccumulator {
     trace_id: String,
     text_output: Vec<String>,
     annotations: Vec<Annotation>,
-    total_prompt_tokens: u32,
-    total_completion_tokens: u32,
     cost_tracker: crate::api::tracing::CostTracker,
     rounds_used: u32,
     finished: bool,
@@ -774,8 +769,8 @@ fn finalize_run(
             SessionStatus::Interrupted
         };
         manifest.last_round = acc.rounds_used;
-        manifest.total_prompt_tokens = acc.total_prompt_tokens;
-        manifest.total_completion_tokens = acc.total_completion_tokens;
+        manifest.total_prompt_tokens = acc.cost_tracker.total_prompt_tokens;
+        manifest.total_completion_tokens = acc.cost_tracker.total_completion_tokens;
         manifest.estimated_cost_usd = acc.cost_tracker.estimated_cost_usd;
         manifest.updated_at = epoch_secs();
 
@@ -814,8 +809,8 @@ fn finalize_run(
         messages,
         text_output: acc.text_output,
         annotations: acc.annotations,
-        total_prompt_tokens: acc.total_prompt_tokens,
-        total_completion_tokens: acc.total_completion_tokens,
+        total_prompt_tokens: acc.cost_tracker.total_prompt_tokens,
+        total_completion_tokens: acc.cost_tracker.total_completion_tokens,
         rounds_used: acc.rounds_used,
         finished: acc.finished,
         estimated_cost_usd: acc.cost_tracker.estimated_cost_usd,
@@ -921,6 +916,7 @@ async fn summarize_if_needed(
     summarizer: &mut Option<Summarizer>,
     tool_metas: &mut Vec<ToolResultMeta>,
     model_for_round: &str,
+    round: u32,
     event_handler: &dyn EventHandler,
     file_tracker: &Option<FileAccessTracker>,
 ) {
@@ -932,6 +928,7 @@ async fn summarize_if_needed(
         summarizer,
         tool_metas,
         model_for_round,
+        round,
         event_handler,
         file_tracker,
     )
@@ -952,6 +949,7 @@ pub(crate) async fn compact_if_needed(
     summarizer: &mut Option<Summarizer>,
     tool_metas: &mut Vec<ToolResultMeta>,
     model_for_round: &str,
+    round: u32,
     event_handler: &dyn EventHandler,
     file_tracker: &Option<FileAccessTracker>,
 ) -> bool {
@@ -961,12 +959,10 @@ pub(crate) async fn compact_if_needed(
     let Some(summ) = summarizer else {
         return false;
     };
-    let Some(budget) = budget else {
+    let Some(_budget) = budget else {
         return false;
     };
-    let api_messages = layout.to_messages();
-    let usage = budget.estimate_usage(&api_messages);
-    if usage.usage_pct < 0.80 {
+    if !layout.should_compact(round as usize) {
         return false;
     }
 

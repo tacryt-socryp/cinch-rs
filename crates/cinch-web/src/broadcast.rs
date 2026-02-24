@@ -329,8 +329,7 @@ impl EventHandler for WebBroadcastHandler {
                     ),
                 });
             }
-            HarnessEvent::SessionStarting { .. }
-            | HarnessEvent::SessionFinishing { .. } => {
+            HarnessEvent::SessionStarting { .. } | HarnessEvent::SessionFinishing { .. } => {
                 // Session lifecycle events are handled by hooks, not WebSocket.
             }
         }

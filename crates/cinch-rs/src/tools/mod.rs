@@ -37,6 +37,7 @@ pub mod common;
 pub mod core;
 pub mod dag;
 pub mod filter;
+pub mod names;
 pub mod read_tracker;
 pub mod reflection;
 pub mod spec;
@@ -52,3 +53,4 @@ pub use core::{
 };
 pub use filter::{ToolCategory, ToolFilter};
 pub use read_tracker::ReadTracker;
+pub use reflection::format_tool_failure;

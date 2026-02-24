@@ -697,9 +697,9 @@ pub struct HarnessResult {
     /// All URL citation annotations collected across rounds.
     pub annotations: Vec<crate::Annotation>,
     /// Total prompt tokens consumed across all rounds.
-    pub total_prompt_tokens: u32,
+    pub total_prompt_tokens: u64,
     /// Total completion tokens consumed across all rounds.
-    pub total_completion_tokens: u32,
+    pub total_completion_tokens: u64,
     /// Number of rounds executed.
     pub rounds_used: u32,
     /// Whether the agent finished naturally (vs hitting the round limit).
@@ -718,7 +718,7 @@ impl HarnessResult {
     }
 
     /// Total tokens (prompt + completion).
-    pub fn total_tokens(&self) -> u32 {
+    pub fn total_tokens(&self) -> u64 {
         self.total_prompt_tokens + self.total_completion_tokens
     }
 }

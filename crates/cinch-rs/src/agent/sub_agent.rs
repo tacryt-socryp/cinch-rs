@@ -522,7 +522,7 @@ impl Tool for DelegateSubAgentTool {
             match child_harness.run(child_messages).await {
                 Ok(result) => {
                     let tokens_consumed =
-                        result.total_prompt_tokens as u64 + result.total_completion_tokens as u64;
+                        result.total_prompt_tokens + result.total_completion_tokens;
                     shared.budget.acquire(tokens_consumed);
 
                     debug!(

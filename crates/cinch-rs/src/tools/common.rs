@@ -209,7 +209,7 @@ const MAX_LINE_CHARS: usize = 500;
 
 impl Tool for ReadFile {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("read_file")
+        ToolSpec::builder(super::names::READ_FILE)
             .purpose("Read a file with numbered lines")
             .when_to_use(
                 "When you need to read a specific file whose path you already know. \
@@ -343,7 +343,7 @@ const DEFAULT_LIST_DIR_LIMIT: u32 = 50;
 
 impl Tool for ListDir {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("list_dir")
+        ToolSpec::builder(super::names::LIST_DIR)
             .purpose("List directory contents as an indented tree")
             .when_to_use(
                 "When you need to discover what files exist in a specific directory",
@@ -404,7 +404,12 @@ impl Tool for ListDir {
             }
 
             let total = entries.len();
-            let page: Vec<&str> = entries.iter().skip(offset).take(limit).map(|s| s.as_str()).collect();
+            let page: Vec<&str> = entries
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .map(|s| s.as_str())
+                .collect();
 
             let mut out = format!("Absolute path: {abs_path}\n");
             for entry in &page {
@@ -463,7 +468,13 @@ async fn collect_dir_entries(
         if ft.is_dir() && current_depth < max_depth {
             let child_path = dir.join(name);
             // Best-effort: skip directories we can't read.
-            let _ = Box::pin(collect_dir_entries(&child_path, max_depth, current_depth + 1, out)).await;
+            let _ = Box::pin(collect_dir_entries(
+                &child_path,
+                max_depth,
+                current_depth + 1,
+                out,
+            ))
+            .await;
         }
     }
     Ok(())
@@ -503,7 +514,7 @@ impl Grep {
 
 impl Tool for Grep {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("grep")
+        ToolSpec::builder(super::names::GREP)
             .purpose("Search for a regex pattern in file contents")
             .when_to_use(
                 "When you need to find text matching a pattern across multiple files. \
@@ -659,8 +670,10 @@ impl FindFiles {
 
 impl Tool for FindFiles {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("find_files")
-            .purpose("Find files matching a glob pattern, sorted by modification time (newest first)")
+        ToolSpec::builder(super::names::FIND_FILES)
+            .purpose(
+                "Find files matching a glob pattern, sorted by modification time (newest first)",
+            )
             .when_to_use(
                 "When you need to discover files by name or extension across nested directories. \
                  Results are sorted by modification time (newest first) so the most recently \
@@ -798,7 +811,7 @@ impl Shell {
 
 impl Tool for Shell {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("shell")
+        ToolSpec::builder(super::names::SHELL)
             .purpose("Run a shell command and return its output")
             .when_to_use(
                 "When you need an operation not covered by other tools: git commands, \
@@ -909,7 +922,7 @@ impl WebSearch {
 
 impl Tool for WebSearch {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("web_search")
+        ToolSpec::builder(super::names::WEB_SEARCH)
             .purpose("Search the web and return results with titles, URLs, and snippets")
             .when_to_use(
                 "When you need current information, recent research, up-to-date data, \
@@ -1051,7 +1064,7 @@ impl EditFile {
 
 impl Tool for EditFile {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("edit_file")
+        ToolSpec::builder(super::names::EDIT_FILE)
             .purpose("Edit a file by replacing an exact string")
             .when_to_use(
                 "When you need to make a targeted change to a file you have already read with read_file. \
@@ -1202,7 +1215,7 @@ impl WriteFile {
 
 impl Tool for WriteFile {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("write_file")
+        ToolSpec::builder(super::names::WRITE_FILE)
             .purpose("Create a new file or overwrite an existing file")
             .when_to_use(
                 "When creating a brand-new file, or when you need to replace an entire \
@@ -1297,8 +1310,7 @@ fn format_output(output: std::process::Output, lenient_exit_codes: &[i32]) -> St
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let code = output.status.code().unwrap_or(-1);
-    let ok = output.status.success()
-        || lenient_exit_codes.contains(&code);
+    let ok = output.status.success() || lenient_exit_codes.contains(&code);
     if ok {
         if stderr.is_empty() {
             format!("[exit: {code}]\n{stdout}")
@@ -1458,8 +1470,14 @@ mod tests {
         let result = tool.execute(r#"{"path": "."}"#).await;
         // Default depth 2: should see a/, a/file.txt, a/b/, a/b/deep.txt
         assert!(result.contains("a/"), "expected 'a/', got:\n{result}");
-        assert!(result.contains("file.txt"), "expected file.txt, got:\n{result}");
-        assert!(result.contains("deep.txt"), "expected deep.txt at depth 2, got:\n{result}");
+        assert!(
+            result.contains("file.txt"),
+            "expected file.txt, got:\n{result}"
+        );
+        assert!(
+            result.contains("deep.txt"),
+            "expected deep.txt at depth 2, got:\n{result}"
+        );
     }
 
     #[tokio::test]
@@ -1475,7 +1493,10 @@ mod tests {
         // Depth 0: should only see top-level entries, not recurse.
         assert!(result.contains("a/"), "expected 'a/' at depth 0");
         assert!(result.contains("top.txt"), "expected top.txt");
-        assert!(!result.contains("deep.txt"), "should not see deep.txt at depth 0");
+        assert!(
+            !result.contains("deep.txt"),
+            "should not see deep.txt at depth 0"
+        );
     }
 
     #[tokio::test]
@@ -1490,10 +1511,22 @@ mod tests {
         let result = tool
             .execute(r#"{"path": ".", "depth": 0, "limit": 3, "offset": 3}"#)
             .await;
-        assert!(result.contains("file_02"), "expected file_02 at offset 3, got:\n{result}");
-        assert!(result.contains("file_04"), "expected file_04, got:\n{result}");
-        assert!(!result.contains("file_00"), "file_00 should be before offset");
-        assert!(result.contains("More than"), "should indicate more entries available");
+        assert!(
+            result.contains("file_02"),
+            "expected file_02 at offset 3, got:\n{result}"
+        );
+        assert!(
+            result.contains("file_04"),
+            "expected file_04, got:\n{result}"
+        );
+        assert!(
+            !result.contains("file_00"),
+            "file_00 should be before offset"
+        );
+        assert!(
+            result.contains("More than"),
+            "should indicate more entries available"
+        );
     }
 
     #[tokio::test]
@@ -1504,7 +1537,10 @@ mod tests {
 
         let tool = ListDir::new(dir.path().to_str().unwrap());
         let result = tool.execute(r#"{"path": ".", "depth": 0}"#).await;
-        assert!(result.contains("subdir/"), "directories should have trailing /");
+        assert!(
+            result.contains("subdir/"),
+            "directories should have trailing /"
+        );
         assert!(
             result.contains("file.txt") && !result.contains("file.txt/"),
             "files should not have trailing /"
@@ -1571,9 +1607,7 @@ mod tests {
         }
 
         let tool = FindFiles::new(dir.path().to_str().unwrap());
-        let result = tool
-            .execute(r#"{"pattern": "*.txt", "limit": 2}"#)
-            .await;
+        let result = tool.execute(r#"{"pattern": "*.txt", "limit": 2}"#).await;
         let lines: Vec<&str> = result.lines().filter(|l| l.ends_with(".txt")).collect();
         assert_eq!(lines.len(), 2, "expected exactly 2 results, got:\n{result}");
     }
@@ -1587,9 +1621,7 @@ mod tests {
         std::fs::write(dir.path().join("outside.txt"), "").unwrap();
 
         let tool = FindFiles::new(dir.path().to_str().unwrap());
-        let result = tool
-            .execute(r#"{"pattern": "*.txt", "path": "sub"}"#)
-            .await;
+        let result = tool.execute(r#"{"pattern": "*.txt", "path": "sub"}"#).await;
         assert!(
             result.contains("inside.txt"),
             "should find inside.txt, got:\n{result}"

@@ -279,6 +279,7 @@ pub(crate) async fn execute_and_record_tool_calls(
                 &mut modules.summarizer,
                 &mut modules.tool_metas,
                 model_for_round,
+                round,
                 event_handler,
                 &modules.file_tracker,
             )
@@ -309,10 +310,11 @@ async fn dispatch_tool_execution(
         return results;
     }
 
-    // Check for dependency annotations, with per-file sequential enforcement.
-    let mut annotated =
-        tool_dag::annotate_tool_calls(&to_execute.iter().map(|c| (*c).clone()).collect::<Vec<_>>());
-    tool_dag::inject_sequential_deps(&mut annotated, &tool_dag::SequentialPolicy::PerFileForMutations);
+    // Check for dependency annotations, with configurable sequential enforcement.
+    let annotated = tool_dag::annotate_tool_calls_with_policy(
+        &to_execute.iter().map(|c| (*c).clone()).collect::<Vec<_>>(),
+        &config.sequential_policy,
+    );
     let has_deps = annotated.iter().any(|a| a.depends_on.is_some());
 
     if has_deps {
@@ -408,8 +410,8 @@ pub(crate) fn save_round_checkpoint(
     messages: &[Message],
     text_output: &[String],
     round: u32,
-    total_prompt_tokens: u32,
-    total_completion_tokens: u32,
+    total_prompt_tokens: u64,
+    total_completion_tokens: u64,
     estimated_cost_usd: f64,
     event_handler: &dyn EventHandler,
 ) {

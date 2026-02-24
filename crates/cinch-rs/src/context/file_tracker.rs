@@ -63,9 +63,13 @@ impl FileAccessTracker {
     /// moved to the end with the updated round and access type.
     pub fn record_tool_access(&mut self, tool_name: &str, arguments: &str, round: usize) {
         let access_type = match tool_name {
-            "read_file" => FileAccessType::Read,
-            "write_file" | "edit_file" => FileAccessType::Write,
-            "list_dir" | "grep" | "find_files" => FileAccessType::Search,
+            crate::tools::names::READ_FILE => FileAccessType::Read,
+            crate::tools::names::WRITE_FILE | crate::tools::names::EDIT_FILE => {
+                FileAccessType::Write
+            }
+            crate::tools::names::LIST_DIR
+            | crate::tools::names::GREP
+            | crate::tools::names::FIND_FILES => FileAccessType::Search,
             _ => return,
         };
 

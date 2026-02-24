@@ -141,8 +141,8 @@ impl ToolFilter {
     /// Register the standard categories for tools provided by
     /// [`ToolSet::with_common_tools`](crate::tools::core::ToolSet::with_common_tools).
     ///
-    /// Adds three categories (`file_ops`, `search`, `shell`) and marks
-    /// `think`, `todo`, `read_file`, `list_dir`, and `shell` as
+    /// Adds five categories (`file_ops`, `search`, `editing`, `shell`, `web`)
+    /// and marks `think`, `todo`, `read_file`, `list_dir`, and `shell` as
     /// always-included. Domain-specific categories can be chained after
     /// this call.
     ///
@@ -154,21 +154,32 @@ impl ToolFilter {
     ///     .with_category(ToolCategory::new("twitter", &["post_tweet"], "When posting"));
     /// ```
     pub fn with_common_categories(self) -> Self {
-        self.with_always_include_all(&["think", "todo", "read_file", "list_dir", "shell"])
+        use super::names::*;
+        self.with_always_include_all(&[THINK, TODO, READ_FILE, LIST_DIR, SHELL])
             .with_category(ToolCategory::new(
                 "file_ops",
-                &["read_file", "list_dir", "find_files"],
+                &[READ_FILE, LIST_DIR, FIND_FILES],
                 "When reading or browsing files",
             ))
             .with_category(ToolCategory::new(
                 "search",
-                &["grep"],
+                &[GREP],
                 "When searching file contents",
             ))
             .with_category(ToolCategory::new(
+                "editing",
+                &[EDIT_FILE, WRITE_FILE],
+                "When modifying or creating files",
+            ))
+            .with_category(ToolCategory::new(
                 "shell",
-                &["shell"],
+                &[SHELL],
                 "When running shell commands",
+            ))
+            .with_category(ToolCategory::new(
+                "web",
+                &[WEB_SEARCH],
+                "When searching the internet",
             ))
     }
 
@@ -262,11 +273,7 @@ mod tests {
 
     #[test]
     fn tool_category_new_convenience() {
-        let cat = ToolCategory::new(
-            "file_ops",
-            &["read_file", "list_dir"],
-            "When reading files",
-        );
+        let cat = ToolCategory::new("file_ops", &["read_file", "list_dir"], "When reading files");
         assert_eq!(cat.name, "file_ops");
         assert_eq!(cat.tools, vec!["read_file", "list_dir"]);
         assert_eq!(cat.when_relevant, "When reading files");
@@ -362,6 +369,6 @@ mod tests {
                 "When posting or drafting tweets",
             ));
 
-        assert_eq!(filter.categories().len(), 4); // file_ops, search, shell, twitter
+        assert_eq!(filter.categories().len(), 6); // file_ops, search, editing, shell, web, twitter
     }
 }

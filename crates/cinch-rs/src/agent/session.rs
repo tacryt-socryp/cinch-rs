@@ -30,9 +30,9 @@ pub struct SessionManifest {
     /// Last completed round number.
     pub last_round: u32,
     /// Cumulative prompt tokens.
-    pub total_prompt_tokens: u32,
+    pub total_prompt_tokens: u64,
     /// Cumulative completion tokens.
-    pub total_completion_tokens: u32,
+    pub total_completion_tokens: u64,
     /// Estimated cost in USD.
     pub estimated_cost_usd: f64,
     /// First ~200 chars of the first user message.

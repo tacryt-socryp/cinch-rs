@@ -46,14 +46,14 @@ impl Default for PlanExecuteConfig {
             max_planning_rounds: 10,
             planning_tools: vec![
                 // Reasoning tools (free — don't consume rounds).
-                "think".into(),
-                "todo".into(),
+                crate::tools::names::THINK.into(),
+                crate::tools::names::TODO.into(),
                 // Exploration tools.
-                "read_file".into(),
-                "list_dir".into(),
-                "grep".into(),
-                "find_files".into(),
-                "shell".into(),
+                crate::tools::names::READ_FILE.into(),
+                crate::tools::names::LIST_DIR.into(),
+                crate::tools::names::GREP.into(),
+                crate::tools::names::FIND_FILES.into(),
+                crate::tools::names::SHELL.into(),
                 // Sub-agent delegation (if registered).
                 "delegate_sub_agent".into(),
             ],
