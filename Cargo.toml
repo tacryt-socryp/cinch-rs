@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cinch-rs", "crates/cinch-tui", "crates/cinch-web"]
+members = ["crates/cinch-rs", "crates/cinch-tui", "crates/cinch-web", "crates/cinch-code"]
 resolver = "3"
 
 [workspace.package]

@@ -304,6 +304,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cinch-code"
+version = "0.2.0"
+dependencies = [
+ "cinch-rs",
+ "cinch-tui",
+ "clap",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cinch-rs"
 version = "0.2.0"
 dependencies = [

@@ -1,0 +1,23 @@
+[package]
+name = "cinch-code"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Terminal coding agent powered by cinch-rs"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cinch-code"
+path = "src/main.rs"
+
+[dependencies]
+cinch-rs = { path = "../cinch-rs", version = "0.2.0" }
+cinch-tui = { path = "../cinch-tui", version = "0.2.0" }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
