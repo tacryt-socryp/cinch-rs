@@ -22,6 +22,7 @@ pub(crate) fn handle_key_event(
         InputMode::Normal => handle_normal_key(key, app),
         InputMode::QuestionSelect => handle_question_select_key(key, app, state),
         InputMode::QuestionEdit => handle_question_edit_key(key, app, state),
+        InputMode::FreeText => handle_free_text_key(key, app, state),
     }
 }
 
@@ -213,6 +214,79 @@ fn handle_question_edit_key(
         }
         KeyCode::Char(c) => {
             app.input_buffer.push(c);
+        }
+        _ => {}
+    }
+}
+
+fn handle_free_text_key(
+    key: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &Arc<Mutex<UiState>>,
+) {
+    match key.code {
+        KeyCode::Enter => {
+            let text = app.input_buffer.trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            {
+                let mut s = state.lock().unwrap();
+                if let Some(ref mut aq) = s.active_question {
+                    aq.response = Some(QuestionResponse::FreeText(text));
+                    aq.done = true;
+                }
+            }
+            app.input_buffer.clear();
+            app.input_mode = InputMode::Normal;
+            app.status_message = None;
+        }
+        KeyCode::Esc => {
+            {
+                let mut s = state.lock().unwrap();
+                if let Some(ref mut aq) = s.active_question {
+                    aq.response = Some(QuestionResponse::Skipped);
+                    aq.done = true;
+                }
+            }
+            app.input_buffer.clear();
+            app.input_mode = InputMode::Normal;
+            app.status_message = Some("Input cancelled.".into());
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        // Pass through navigation keys so the user can scroll and
+        // switch panes while typing.
+        KeyCode::Up => {
+            let scroll = active_scroll_mut(app);
+            *scroll = scroll.saturating_add(3);
+        }
+        KeyCode::Down => {
+            let scroll = active_scroll_mut(app);
+            *scroll = scroll.saturating_sub(3);
+        }
+        KeyCode::PageUp => {
+            let scroll = active_scroll_mut(app);
+            *scroll = scroll.saturating_add(20);
+        }
+        KeyCode::PageDown => {
+            let scroll = active_scroll_mut(app);
+            *scroll = scroll.saturating_sub(20);
+        }
+        KeyCode::End => {
+            *active_scroll_mut(app) = 0;
+        }
+        KeyCode::Tab | KeyCode::BackTab => {
+            if app.show_logs {
+                app.active_pane = match app.active_pane {
+                    ActivePane::Log => ActivePane::AgentOutput,
+                    ActivePane::AgentOutput => ActivePane::Log,
+                };
+            }
         }
         _ => {}
     }

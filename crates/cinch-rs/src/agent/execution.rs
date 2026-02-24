@@ -52,19 +52,20 @@ pub(crate) async fn send_round_request(
     };
 
     if config.streaming {
-        let events = retry_api_call(&config.retry, || client.chat_stream(&body)).await?;
-
-        for event in &events {
-            match event {
-                crate::api::streaming::StreamEvent::TextDelta(delta) => {
-                    event_handler.on_event(&HarnessEvent::TextDelta(delta));
+        let events = retry_api_call(&config.retry, || {
+            client.chat_stream_live(&body, |event| {
+                match event {
+                    crate::api::streaming::StreamEvent::TextDelta(delta) => {
+                        event_handler.on_event(&HarnessEvent::TextDelta(delta));
+                    }
+                    crate::api::streaming::StreamEvent::ReasoningDelta(delta) => {
+                        event_handler.on_event(&HarnessEvent::ReasoningDelta(delta));
+                    }
+                    _ => {}
                 }
-                crate::api::streaming::StreamEvent::ReasoningDelta(delta) => {
-                    event_handler.on_event(&HarnessEvent::ReasoningDelta(delta));
-                }
-                _ => {}
-            }
-        }
+            })
+        })
+        .await?;
 
         let text = crate::api::streaming::collect_text(&events);
         let reasoning = crate::api::streaming::collect_reasoning(&events);

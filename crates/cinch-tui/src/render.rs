@@ -322,6 +322,10 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &[cinch_rs::ui::LogLine], ap
     let mut lines: Vec<Line> = Vec::with_capacity(logs.len());
 
     for log in logs {
+        // Filter out trace/debug-level logs — they're too noisy for the TUI.
+        if matches!(log.level, LogLevel::Trace | LogLevel::Debug) {
+            continue;
+        }
         let level_span = Span::styled(
             format!("{} ", log.level.label()),
             log_level_style(log.level),
@@ -623,11 +627,18 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Cyan),
             )
         }
+        InputMode::FreeText => {
+            let char_count = app.input_buffer.chars().count();
+            (
+                format!(" Type your message ({char_count} chars) \u{2014} [Enter] send  [Esc] cancel "),
+                Style::default().fg(Color::Green),
+            )
+        }
     };
 
     let input_text = match app.input_mode {
         InputMode::Normal | InputMode::QuestionSelect => String::new(),
-        InputMode::QuestionEdit => {
+        InputMode::QuestionEdit | InputMode::FreeText => {
             format!("> {}\u{2588}", app.input_buffer)
         }
     };

@@ -9,6 +9,8 @@ pub(crate) enum InputMode {
     /// Question editing mode — the user is editing a selected choice before confirming.
     /// Pre-filled with the original text; Enter confirms, Esc cancels back to select.
     QuestionEdit,
+    /// Free-text input mode — user types a prompt, Enter submits, Esc cancels.
+    FreeText,
 }
 
 /// Which pane currently receives scroll input.

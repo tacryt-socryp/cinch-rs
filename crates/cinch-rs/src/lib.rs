@@ -664,7 +664,8 @@ impl OpenRouterClient {
     ) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .user_agent("openrouter-client/0.1")
-            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(300))
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
         Ok(Self {

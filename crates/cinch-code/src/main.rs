@@ -33,7 +33,7 @@ struct Cli {
     prompt: Option<String>,
 
     /// Model to use for completions.
-    #[arg(long, default_value = "anthropic/claude-sonnet-4")]
+    #[arg(long, default_value = "minimax/minimax-m2.5")]
     model: String,
 
     /// Working directory for file and git operations.
@@ -53,15 +53,60 @@ struct Cli {
     temperature: f32,
 }
 
+/// Detect the git repository root for the current directory.
+fn detect_git_root() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Ask the user for free-text input via the TUI question system.
+async fn get_user_input(ui_state: &Arc<Mutex<UiState>>) -> Option<String> {
+    let question = UserQuestion {
+        prompt: "Enter your message".to_string(),
+        choices: vec![],
+        editable: false,
+        max_edit_length: None,
+    };
+    ask_question(ui_state, question, 86400);
+
+    loop {
+        if ui_state.lock().unwrap().quit_requested {
+            return None;
+        }
+        if let Some(response) = poll_question(ui_state) {
+            return match response {
+                QuestionResponse::FreeText(text) => Some(text),
+                QuestionResponse::Skipped | QuestionResponse::TimedOut => None,
+                _ => None,
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
-    // Resolve working directory to absolute path.
-    let workdir = std::fs::canonicalize(&cli.workdir)
-        .unwrap_or_else(|_| PathBuf::from(&cli.workdir))
-        .to_string_lossy()
-        .to_string();
+    // Resolve working directory: git root > canonicalize > fallback.
+    let workdir = if cli.workdir == "." {
+        detect_git_root()
+            .or_else(|| {
+                std::fs::canonicalize(".")
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| ".".to_string())
+    } else {
+        std::fs::canonicalize(&cli.workdir)
+            .unwrap_or_else(|_| PathBuf::from(&cli.workdir))
+            .to_string_lossy()
+            .to_string()
+    };
 
     // Build config from CLI args.
     let config = CodeConfig {
@@ -112,52 +157,98 @@ async fn main() {
     };
     let tui_handle = cinch_tui::spawn_tui(ui_state.clone(), tui_config);
 
-    // Build messages.
-    let prompt_text = match &cli.prompt {
-        Some(p) => p.clone(),
-        None => {
-            // Interactive mode: use a default prompt.
-            // In a full implementation this would read from TUI input,
-            // but for now we require --prompt.
-            eprintln!("Error: --prompt is required (interactive input not yet implemented)");
-            ui_state.lock().unwrap().quit_requested = true;
-            tui_handle.join().ok();
-            std::process::exit(1);
-        }
-    };
-
-    let messages = vec![
-        Message::system(cinch_code::coding_system_prompt()),
-        Message::user(&prompt_text),
-    ];
-
     // Event handler: UI state updater.
     let ui_handler = UiEventHandler::new(ui_state.clone());
 
-    // Run the agent.
-    let result = Harness::new(&client, &tools, harness_config)
-        .with_event_handler(&ui_handler)
-        .run(messages)
-        .await;
+    // Conversation loop.
+    let mut messages = vec![Message::system(cinch_code::coding_system_prompt())];
 
-    // Mark agent as finished.
-    {
-        let mut s = ui_state.lock().unwrap();
-        s.running = false;
-    }
-
-    match result {
-        Ok(r) => {
-            let text = r.text();
-            if !text.is_empty() {
-                push_agent_text(&ui_state, &format!("\n--- Final output ---\n{text}"));
+    // First turn: --prompt or interactive input.
+    let first_prompt = if let Some(p) = cli.prompt {
+        p
+    } else {
+        match get_user_input(&ui_state).await {
+            Some(text) => text,
+            None => {
+                ui_state.lock().unwrap().quit_requested = true;
+                tui_handle.join().ok();
+                return;
             }
         }
-        Err(e) => {
-            push_agent_text(&ui_state, &format!("\nError: {e}"));
+    };
+
+    push_user_message(&ui_state, &first_prompt);
+    messages.push(Message::user(&first_prompt));
+
+    let ui_state_stop = ui_state.clone();
+
+    loop {
+        // Check if quit was requested.
+        if ui_state.lock().unwrap().quit_requested {
+            break;
+        }
+
+        // Run the agent harness for this turn, retrying on transient API errors.
+        const MAX_RETRIES: u32 = 3;
+        let mut attempt = 0;
+        let turn_ok = loop {
+            attempt += 1;
+            let result = Harness::new(&client, &tools, harness_config.clone())
+                .with_event_handler(&ui_handler)
+                .with_stop_signal(|| ui_state_stop.lock().unwrap().quit_requested)
+                .run(messages.clone())
+                .await;
+
+            match result {
+                Ok(r) => {
+                    let text = r.text();
+                    messages = r.messages;
+                    if !text.is_empty() {
+                        push_agent_text(&ui_state, &text);
+                    }
+                    break true;
+                }
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        push_agent_text(
+                            &ui_state,
+                            &format!("Error (attempt {attempt}/{MAX_RETRIES}): {e}"),
+                        );
+                        break false;
+                    }
+                    push_agent_text(
+                        &ui_state,
+                        &format!(
+                            "Error (attempt {attempt}/{MAX_RETRIES}): {e} — retrying in 2s..."
+                        ),
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if ui_state.lock().unwrap().quit_requested {
+                        break false;
+                    }
+                }
+            }
+        };
+        // On persistent failure, still continue to the input prompt so the
+        // user can retry or adjust their request.
+        let _ = turn_ok;
+
+        // Check quit again after harness completes.
+        if ui_state.lock().unwrap().quit_requested {
+            break;
+        }
+
+        // Get next user input.
+        match get_user_input(&ui_state).await {
+            Some(text) => {
+                push_user_message(&ui_state, &text);
+                messages.push(Message::user(&text));
+            }
+            None => break,
         }
     }
 
-    // Wait for TUI to exit.
+    // Mark agent as finished and wait for TUI to exit.
+    ui_state.lock().unwrap().running = false;
     tui_handle.join().ok();
 }

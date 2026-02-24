@@ -95,66 +95,100 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
     let mut app = App::new();
 
     loop {
-        // Check if we should exit.
-        let (running, quit) = {
-            let s = state.lock().unwrap();
-            (s.running, s.quit_requested)
+        // Drain pending log lines from the tracing buffer *before*
+        // acquiring the UiState lock.  `drain()` only touches the
+        // LogBuffer's internal mutex, so it never contends with the
+        // agent runtime.
+        let pending_logs = config
+            .log_buffer
+            .as_ref()
+            .map(|buf| buf.drain())
+            .unwrap_or_default();
+
+        // ── Single lock acquisition ──────────────────────────────
+        // Read everything the frame needs and apply side-effects
+        // (log flush, timeout) in one shot to minimize contention
+        // with the agent's async runtime.
+        enum QuestionAction {
+            None,
+            EnterSelect,
+            EnterFreeText,
+            TimedOut,
+        }
+
+        let (running, quit, question_action) = {
+            let mut s = state.lock().unwrap();
+
+            // Merge drained log lines.
+            if !pending_logs.is_empty() {
+                s.logs.extend(pending_logs);
+                // Respect the same trim limits as LogBuffer::flush_into.
+                if s.logs.len() > cinch_rs::ui::MAX_LOG_LINES {
+                    let trim_to = s.logs.len() - cinch_rs::ui::LOG_TRIM_TO;
+                    s.logs.drain(..trim_to);
+                }
+            }
+
+            // Determine question action.
+            let qa = match app.input_mode {
+                InputMode::Normal => match s.active_question.as_ref() {
+                    Some(aq) if !aq.done && !aq.question.choices.is_empty() => {
+                        QuestionAction::EnterSelect
+                    }
+                    Some(aq) if !aq.done && aq.question.choices.is_empty() => {
+                        QuestionAction::EnterFreeText
+                    }
+                    _ => QuestionAction::None,
+                },
+                InputMode::QuestionSelect | InputMode::QuestionEdit | InputMode::FreeText => {
+                    let timed_out = s.active_question.as_ref().is_some_and(|aq| {
+                        aq.deadline
+                            .is_some_and(|deadline| Instant::now() >= deadline)
+                    });
+                    if timed_out {
+                        if let Some(ref mut aq) = s.active_question {
+                            aq.response = None; // will default to TimedOut in poll_question
+                            aq.done = true;
+                        }
+                        QuestionAction::TimedOut
+                    } else {
+                        QuestionAction::None
+                    }
+                }
+            };
+
+            (s.running, s.quit_requested, qa)
+            // lock released here
         };
+
+        // ── Apply results (no lock held) ─────────────────────────
+
         if app.should_quit || quit {
             state.lock().unwrap().quit_requested = true;
             break;
         }
 
-        // Auto-enter question-select mode when a question becomes available.
-        if matches!(app.input_mode, InputMode::Normal) {
-            let should_enter = {
-                let s = state.lock().unwrap();
-                s.active_question
-                    .as_ref()
-                    .is_some_and(|aq| !aq.done && !aq.question.choices.is_empty())
-            };
-            if should_enter {
+        match question_action {
+            QuestionAction::EnterSelect => {
                 app.input_mode = InputMode::QuestionSelect;
                 app.question_cursor = 0;
                 app.question_scroll = 0;
                 app.status_message = None;
             }
-        }
-
-        // Check for question timeout while in question-select mode.
-        if matches!(
-            app.input_mode,
-            InputMode::QuestionSelect | InputMode::QuestionEdit
-        ) {
-            let timed_out = {
-                let s = state.lock().unwrap();
-                s.active_question.as_ref().is_some_and(|aq| {
-                    aq.deadline
-                        .is_some_and(|deadline| Instant::now() >= deadline)
-                })
-            };
-            if timed_out {
-                {
-                    let mut s = state.lock().unwrap();
-                    if let Some(ref mut aq) = s.active_question {
-                        aq.response = None; // will default to TimedOut in poll_question
-                        aq.done = true;
-                    }
-                }
+            QuestionAction::EnterFreeText => {
+                app.input_mode = InputMode::FreeText;
+                app.input_buffer.clear();
+                app.status_message = None;
+            }
+            QuestionAction::TimedOut => {
                 app.input_mode = InputMode::Normal;
                 app.input_buffer.clear();
                 app.status_message = Some("Selection timed out.".into());
             }
+            QuestionAction::None => {}
         }
 
-        // Flush pending log lines from the tracing layer into UiState
-        // before rendering.  This acquires the UiState lock briefly and
-        // only when there are new lines, keeping the render path fast.
-        if let Some(ref log_buf) = config.log_buffer {
-            log_buf.flush_into(&state);
-        }
-
-        // Render.
+        // Render (takes its own snapshot lock internally).
         terminal.draw(|frame| {
             render(frame, &state, &app, config.extension_renderer.as_ref());
         })?;
@@ -168,6 +202,9 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
 
         // In --once mode, auto-show exit message after agent finishes.
         if !running && matches!(app.input_mode, InputMode::Normal) && app.status_message.is_none() {
+            // We already read `running` and question state above, so we
+            // can skip the extra lock when the agent is still running
+            // (the common case).
             let has_pending_question = {
                 let s = state.lock().unwrap();
                 s.active_question.as_ref().is_some_and(|aq| !aq.done)

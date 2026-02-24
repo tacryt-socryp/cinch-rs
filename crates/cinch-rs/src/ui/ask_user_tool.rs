@@ -156,6 +156,12 @@ fn format_response(response: &super::QuestionResponse, choices: &[String]) -> St
             "text": edited_text,
         })
         .to_string(),
+        super::QuestionResponse::FreeText(text) => serde_json::json!({
+            "status": "free_text",
+            "index": null,
+            "text": text,
+        })
+        .to_string(),
         super::QuestionResponse::Skipped => {
             r#"{"status": "skipped", "index": null, "text": null}"#.to_string()
         }

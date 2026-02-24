@@ -1,9 +1,8 @@
 //! File-based memory instructions and MEMORY.md index loading.
 //!
-//! Agents use a `memory/` directory for persistent cross-session knowledge.
-//! The primary file is `memory/MEMORY.md` — a concise, semantically organized
-//! index kept under ~200 lines. Topic files (`memory/*.md`) hold detailed
-//! notes and are loaded on demand, not at startup.
+//! Agents use a top-level `MEMORY.md` file for persistent cross-session
+//! knowledge — a concise, semantically organized document kept under ~200
+//! lines.
 //!
 //! The default prompt teaches agents this convention. At runtime,
 //! [`read_memory_index()`] loads the MEMORY.md content for injection into the
@@ -33,21 +32,19 @@ Rules:
 /// Returns the default file-based memory prompt for injection into system messages.
 ///
 /// Teaches the agent the MEMORY.md convention:
-/// - `memory/MEMORY.md` as the primary index (concise, under 200 lines)
-/// - Topic files (`memory/*.md`) for detailed notes, loaded on demand
+/// - Top-level `MEMORY.md` as the single persistent memory file (under 200 lines)
 /// - Semantic organization by topic, not chronological
 pub fn default_memory_prompt() -> String {
     r#"## File-Based Memory
 
-You have a persistent memory directory at `memory/`. Its contents persist across sessions.
+You have a persistent `MEMORY.md` file at the project root. Its contents persist across sessions.
 
-As you work, consult your memory files to build on previous experience.
+As you work, consult MEMORY.md to build on previous experience.
 
 ### How to save memories
 
 - Organize memory semantically by topic, not chronologically
-- `memory/MEMORY.md` is the primary index — keep it concise and under 200 lines
-- Create separate topic files (e.g., `memory/debugging.md`, `memory/patterns.md`) for detailed notes and link to them from MEMORY.md
+- Keep MEMORY.md concise and under 200 lines
 - Update or remove memories that turn out to be wrong or outdated
 - Do not write duplicate memories — check if there is an existing entry to update first
 

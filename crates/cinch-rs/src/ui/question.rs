@@ -40,6 +40,8 @@ pub enum QuestionResponse {
     Selected(usize),
     /// User selected a choice and edited its body text.
     SelectedEdited { index: usize, edited_text: String },
+    /// User typed free-form text (no pre-defined choices).
+    FreeText(String),
     /// User explicitly skipped / dismissed the question.
     Skipped,
     /// The question timed out with no user interaction.

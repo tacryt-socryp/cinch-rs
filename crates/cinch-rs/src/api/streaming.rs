@@ -81,7 +81,7 @@ impl OpenRouterClient {
 
         debug!("Sending streaming chat request");
 
-        let resp = self
+        let mut resp = self
             .client
             .post(OPENROUTER_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -98,75 +98,47 @@ impl OpenRouterClient {
             return Err(format!("OpenRouter API HTTP {status}: {text}"));
         }
 
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("failed to read streaming response: {e}"))?;
-
+        // Read the SSE stream incrementally via chunk() so long responses
+        // (e.g. file-write tool calls) don't hit a single-body timeout.
         let mut events = Vec::new();
+        let mut buffer = String::new();
 
-        // Parse SSE lines.
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            if line == "data: [DONE]" {
-                events.push(StreamEvent::Done);
-                break;
-            }
-            if let Some(data) = line.strip_prefix("data: ") {
-                match serde_json::from_str::<StreamChunk>(data) {
-                    Ok(chunk) => {
-                        // Emit usage if present.
-                        if let Some(usage) = chunk.usage {
-                            events.push(StreamEvent::Usage(usage));
-                        }
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("failed to read streaming chunk: {e}"))?
+        {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                        // Process choices.
-                        if let Some(choices) = chunk.choices {
-                            for choice in choices {
-                                if let Some(delta) = choice.delta {
-                                    // Text content delta.
-                                    if let Some(content) = delta.content
-                                        && !content.is_empty()
-                                    {
-                                        events.push(StreamEvent::TextDelta(content));
-                                    }
-                                    // Reasoning delta.
-                                    if let Some(reasoning) = delta.reasoning
-                                        && !reasoning.is_empty()
-                                    {
-                                        events.push(StreamEvent::ReasoningDelta(reasoning));
-                                    }
-                                    // Tool call deltas.
-                                    if let Some(tool_calls) = delta.tool_calls {
-                                        for tc in tool_calls {
-                                            let func = tc.function.unwrap_or(StreamFunctionDelta {
-                                                name: None,
-                                                arguments: None,
-                                            });
-                                            events.push(StreamEvent::ToolCallDelta {
-                                                index: tc.index.unwrap_or(0),
-                                                id: tc.id,
-                                                name: func.name,
-                                                arguments_delta: func.arguments.unwrap_or_default(),
-                                            });
-                                        }
-                                    }
-                                }
-                                // If finish_reason is set, mark as done.
-                                if choice.finish_reason.is_some() {
-                                    trace!("Stream finish_reason: {:?}", choice.finish_reason);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse SSE chunk: {e} — data: {data}");
-                    }
+            // Process all complete lines in the buffer.
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line: String = buffer.drain(..=newline_pos).collect();
+                let line = line.trim();
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+                if line == "data: [DONE]" {
+                    events.push(StreamEvent::Done);
+                    break;
+                }
+                if let Some(data) = line.strip_prefix("data: ") {
+                    parse_sse_data(data, &mut events);
                 }
             }
+
+            // If we already received Done, stop reading.
+            if events.iter().any(|e| matches!(e, StreamEvent::Done)) {
+                break;
+            }
+        }
+
+        // Process any remaining data in the buffer (incomplete final line).
+        let remaining = buffer.trim();
+        if !remaining.is_empty()
+            && remaining != "data: [DONE]"
+            && let Some(data) = remaining.strip_prefix("data: ")
+        {
+            parse_sse_data(data, &mut events);
         }
 
         // Ensure Done event at the end.
@@ -176,6 +148,157 @@ impl OpenRouterClient {
 
         debug!("Stream completed with {} events", events.len());
         Ok(events)
+    }
+
+    /// Send a streaming chat request, invoking `on_event` for each event as
+    /// it arrives off the wire.
+    ///
+    /// This gives the caller (e.g. the TUI) real-time visibility into text
+    /// and reasoning deltas while tool-call argument fragments are still
+    /// being received. The full event list is also returned for post-hoc
+    /// assembly of tool calls, usage, etc.
+    pub async fn chat_stream_live(
+        &self,
+        body: &ChatRequest,
+        mut on_event: impl FnMut(&StreamEvent),
+    ) -> Result<Vec<StreamEvent>, String> {
+        let mut stream_body =
+            serde_json::to_value(body).map_err(|e| format!("failed to serialize request: {e}"))?;
+        stream_body["stream"] = serde_json::Value::Bool(true);
+
+        debug!("Sending live streaming chat request");
+
+        let mut resp = self
+            .client
+            .post(OPENROUTER_URL)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", &self.referer)
+            .header("X-Title", &self.title)
+            .json(&stream_body)
+            .send()
+            .await
+            .map_err(|e| format!("streaming request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("OpenRouter API HTTP {status}: {text}"));
+        }
+
+        let mut events = Vec::new();
+        let mut buffer = String::new();
+        let mut done = false;
+
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("failed to read streaming chunk: {e}"))?
+        {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line: String = buffer.drain(..=newline_pos).collect();
+                let line = line.trim();
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+                if line == "data: [DONE]" {
+                    let ev = StreamEvent::Done;
+                    on_event(&ev);
+                    events.push(ev);
+                    done = true;
+                    break;
+                }
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let before = events.len();
+                    parse_sse_data(data, &mut events);
+                    // Emit newly parsed events to the callback.
+                    for ev in &events[before..] {
+                        on_event(ev);
+                    }
+                }
+            }
+
+            if done {
+                break;
+            }
+        }
+
+        // Process any remaining data in the buffer.
+        let remaining = buffer.trim();
+        if !remaining.is_empty()
+            && remaining != "data: [DONE]"
+            && let Some(data) = remaining.strip_prefix("data: ")
+        {
+            let before = events.len();
+            parse_sse_data(data, &mut events);
+            for ev in &events[before..] {
+                on_event(ev);
+            }
+        }
+
+        if !events.iter().any(|e| matches!(e, StreamEvent::Done)) {
+            let ev = StreamEvent::Done;
+            on_event(&ev);
+            events.push(ev);
+        }
+
+        debug!("Live stream completed with {} events", events.len());
+        Ok(events)
+    }
+}
+
+/// Parse a single SSE `data:` payload into stream events.
+fn parse_sse_data(data: &str, events: &mut Vec<StreamEvent>) {
+    match serde_json::from_str::<StreamChunk>(data) {
+        Ok(chunk) => {
+            // Emit usage if present.
+            if let Some(usage) = chunk.usage {
+                events.push(StreamEvent::Usage(usage));
+            }
+
+            // Process choices.
+            if let Some(choices) = chunk.choices {
+                for choice in choices {
+                    if let Some(delta) = choice.delta {
+                        // Text content delta.
+                        if let Some(content) = delta.content
+                            && !content.is_empty()
+                        {
+                            events.push(StreamEvent::TextDelta(content));
+                        }
+                        // Reasoning delta.
+                        if let Some(reasoning) = delta.reasoning
+                            && !reasoning.is_empty()
+                        {
+                            events.push(StreamEvent::ReasoningDelta(reasoning));
+                        }
+                        // Tool call deltas.
+                        if let Some(tool_calls) = delta.tool_calls {
+                            for tc in tool_calls {
+                                let func = tc.function.unwrap_or(StreamFunctionDelta {
+                                    name: None,
+                                    arguments: None,
+                                });
+                                events.push(StreamEvent::ToolCallDelta {
+                                    index: tc.index.unwrap_or(0),
+                                    id: tc.id,
+                                    name: func.name,
+                                    arguments_delta: func.arguments.unwrap_or_default(),
+                                });
+                            }
+                        }
+                    }
+                    // If finish_reason is set, mark as done.
+                    if choice.finish_reason.is_some() {
+                        trace!("Stream finish_reason: {:?}", choice.finish_reason);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to parse SSE chunk: {e} — data: {data}");
+        }
     }
 }
 
