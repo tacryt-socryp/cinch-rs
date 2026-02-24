@@ -8,6 +8,7 @@
 //! more data.
 
 use crate::Message;
+use crate::context::layout::message_tokens;
 
 /// Default characters per token (conservative estimate for English text).
 /// Most tokenizers average 3-4 chars per token; we use 3.5 as a middle ground.
@@ -128,15 +129,12 @@ impl ContextBudget {
     /// Usage percentage is computed against [`effective_max_tokens()`](Self::effective_max_tokens)
     /// rather than raw `max_tokens`, so thresholds account for output and system reserves.
     pub fn estimate_usage(&self, messages: &[Message]) -> ContextUsage {
-        let mut total_chars = self.system_prompt_chars;
-
-        for msg in messages {
-            if let Some(ref content) = msg.content {
-                total_chars += content.len();
-            }
-        }
-
-        let estimated_tokens = (total_chars as f64 / self.chars_per_token) as usize;
+        let system_tokens = (self.system_prompt_chars as f64 / self.chars_per_token).ceil() as usize;
+        let message_total: usize = messages
+            .iter()
+            .map(|m| message_tokens(m, self.chars_per_token))
+            .sum();
+        let estimated_tokens = system_tokens + message_total;
         let effective = self.effective_max_tokens();
         let usage_pct = if effective > 0 {
             estimated_tokens as f64 / effective as f64

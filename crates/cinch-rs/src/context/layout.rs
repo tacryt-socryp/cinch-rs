@@ -14,6 +14,20 @@
 use crate::Message;
 use std::collections::VecDeque;
 
+/// Estimate tokens for a single message, accounting for content, tool_calls, and tool_call_id.
+pub fn message_tokens(msg: &Message, chars_per_token: f64) -> usize {
+    let mut chars = msg.content.as_ref().map_or(0, |c| c.len());
+    if let Some(ref calls) = msg.tool_calls {
+        for call in calls {
+            chars += call.function.name.len() + call.function.arguments.len() + 20;
+        }
+    }
+    if let Some(ref id) = msg.tool_call_id {
+        chars += id.len();
+    }
+    (chars as f64 / chars_per_token).ceil() as usize
+}
+
 /// Default number of recent messages to keep in the raw recency window.
 const DEFAULT_KEEP_RECENT: usize = 10;
 
@@ -150,12 +164,8 @@ impl ContextLayout {
 
     /// Estimate total tokens across all zones.
     pub fn estimate_tokens(&self) -> usize {
-        let total_chars: usize = self
-            .to_messages()
-            .iter()
-            .map(|m| m.content.as_ref().map_or(0, |c| c.len()))
-            .sum();
-        (total_chars as f64 / self.chars_per_token) as usize
+        let msgs = self.to_messages();
+        Self::estimate_tokens_for(&msgs, self.chars_per_token)
     }
 
     /// Set minimum rounds between compaction events (cache-aware: compact
@@ -310,11 +320,10 @@ impl ContextLayout {
 
     /// Estimate tokens for a slice of messages.
     fn estimate_tokens_for(messages: &[Message], chars_per_token: f64) -> usize {
-        let total_chars: usize = messages
+        messages
             .iter()
-            .map(|m| m.content.as_ref().map_or(0, |c| c.len()))
-            .sum();
-        (total_chars as f64 / chars_per_token) as usize
+            .map(|m| message_tokens(m, chars_per_token))
+            .sum()
     }
 
     /// Compute a per-zone breakdown of estimated token usage.
@@ -336,14 +345,11 @@ impl ContextLayout {
 
         let middle_tokens = Self::estimate_tokens_for(&self.middle, self.chars_per_token);
 
-        let recency_msgs: Vec<&Message> = self.recency_window.iter().collect();
-        let recency_tokens = {
-            let total_chars: usize = recency_msgs
-                .iter()
-                .map(|m| m.content.as_ref().map_or(0, |c| c.len()))
-                .sum();
-            (total_chars as f64 / self.chars_per_token) as usize
-        };
+        let recency_tokens: usize = self
+            .recency_window
+            .iter()
+            .map(|m| message_tokens(m, self.chars_per_token))
+            .sum();
 
         let total_tokens =
             prefix_tokens + compressed_history_tokens + middle_tokens + recency_tokens;
@@ -470,6 +476,39 @@ mod tests {
 
         let bd = layout.breakdown();
         assert!(bd.compressed_history_tokens > 0);
+    }
+
+    #[test]
+    fn message_tokens_counts_tool_calls() {
+        let msg = Message::assistant_tool_calls(vec![crate::ToolCall {
+            id: "call_1".into(),
+            call_type: crate::CallType::Function,
+            function: crate::FunctionCallData {
+                name: "read_file".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+        }]);
+        let tokens = message_tokens(&msg, 3.5);
+        assert!(tokens > 0, "tool call message should estimate > 0 tokens");
+    }
+
+    #[test]
+    fn message_tokens_counts_content() {
+        let msg = Message::user("hello");
+        let tokens = message_tokens(&msg, 3.5);
+        assert!(tokens > 0, "content message should estimate > 0 tokens");
+    }
+
+    #[test]
+    fn message_tokens_counts_tool_result_id() {
+        let msg = Message::tool_result("call_abc123", "file contents here");
+        let tokens = message_tokens(&msg, 3.5);
+        // Should account for both content and tool_call_id
+        let content_only = message_tokens(&Message::user("file contents here"), 3.5);
+        assert!(
+            tokens > content_only,
+            "tool result should count more than content alone (has call_id)"
+        );
     }
 
     #[test]

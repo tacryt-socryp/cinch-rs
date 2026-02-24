@@ -237,6 +237,10 @@ pub(crate) async fn execute_and_record_tool_calls(
                 round: round as usize,
                 message_index,
                 char_count: result.len(),
+                estimated_tokens: crate::context::layout::message_tokens(
+                    &Message::tool_result(&call_id, result.clone()),
+                    config.eviction.config.chars_per_token,
+                ),
             });
         }
 

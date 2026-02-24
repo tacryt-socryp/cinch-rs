@@ -10,6 +10,7 @@
 //! recovers 10-100x more tokens than model reasoning occupies.
 
 use crate::Message;
+use crate::context::layout::message_tokens;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -72,6 +73,8 @@ pub struct ToolResultMeta {
     pub message_index: usize,
     /// Approximate character count of the original result.
     pub char_count: usize,
+    /// Estimated token count of the original result.
+    pub estimated_tokens: usize,
 }
 
 /// Compute eviction priority for a tool result. Higher score = evict first.
@@ -85,7 +88,7 @@ pub struct ToolResultMeta {
 ///   environment, unlike mutation tool results.
 pub fn eviction_priority(meta: &ToolResultMeta, current_round: usize) -> f64 {
     let age = (current_round.saturating_sub(meta.round)).max(1) as f64;
-    let size_factor = (meta.char_count.max(1) as f64).ln();
+    let size_factor = (meta.estimated_tokens.max(1) as f64).ln();
     let tool_factor = match meta.tool_name.as_str() {
         "read_file" | "grep" | "find_files" | "list_files" => 1.5,
         _ => 1.0,
@@ -156,11 +159,10 @@ pub fn evict_tool_results(
 
 /// Estimate total tokens for a slice of messages.
 fn estimate_tokens_for_messages(messages: &[Message], chars_per_token: f64) -> usize {
-    let total_chars: usize = messages
+    messages
         .iter()
-        .map(|m| m.content.as_ref().map_or(0, |c| c.len()))
-        .sum();
-    (total_chars as f64 / chars_per_token) as usize
+        .map(|m| message_tokens(m, chars_per_token))
+        .sum()
 }
 
 /// Extract a short argument summary from raw JSON arguments for use in placeholders.
@@ -233,6 +235,7 @@ mod tests {
                 round: 1,
                 message_index: 2,
                 char_count: 10000,
+                estimated_tokens: 2857,
             },
             ToolResultMeta {
                 tool_name: "grep".into(),
@@ -240,6 +243,7 @@ mod tests {
                 round: 2,
                 message_index: 3,
                 char_count: 10000,
+                estimated_tokens: 2857,
             },
             ToolResultMeta {
                 tool_name: "read_file".into(),
@@ -247,6 +251,7 @@ mod tests {
                 round: 3,
                 message_index: 4,
                 char_count: 10000,
+                estimated_tokens: 2857,
             },
         ];
 
@@ -280,6 +285,7 @@ mod tests {
             round: 1,
             message_index: 0,
             char_count: 10000,
+            estimated_tokens: 2857,
         }];
 
         let config = EvictionConfig::new()
@@ -307,6 +313,7 @@ mod tests {
             round: 4,
             message_index: 0,
             char_count: 10000,
+            estimated_tokens: 2857,
         }];
 
         let config = EvictionConfig::new().with_min_age(3);
@@ -325,6 +332,7 @@ mod tests {
             round: 2,
             message_index: 0,
             char_count: 30_000,
+            estimated_tokens: 8572,
         };
         let small_shell = ToolResultMeta {
             tool_name: "shell".into(),
@@ -332,6 +340,7 @@ mod tests {
             round: 1,
             message_index: 1,
             char_count: 50,
+            estimated_tokens: 15,
         };
 
         let current_round = 5;
@@ -361,6 +370,7 @@ mod tests {
                 round: 1,
                 message_index: 2,
                 char_count: 50,
+                estimated_tokens: 15,
             },
             ToolResultMeta {
                 tool_name: "read_file".into(),
@@ -368,6 +378,7 @@ mod tests {
                 round: 2,
                 message_index: 3,
                 char_count: 30_000,
+                estimated_tokens: 8572,
             },
             ToolResultMeta {
                 tool_name: "grep".into(),
@@ -375,6 +386,7 @@ mod tests {
                 round: 3,
                 message_index: 4,
                 char_count: 500,
+                estimated_tokens: 143,
             },
         ];
 
