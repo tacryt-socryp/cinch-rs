@@ -19,16 +19,23 @@ pub(crate) fn handle_key_event(
     }
 
     match app.input_mode {
-        InputMode::Normal => handle_normal_key(key, app),
+        InputMode::Normal => handle_normal_key(key, app, state),
         InputMode::QuestionSelect => handle_question_select_key(key, app, state),
         InputMode::QuestionEdit => handle_question_edit_key(key, app, state),
         InputMode::FreeText => handle_free_text_key(key, app, state),
     }
 }
 
-fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App) {
+fn handle_normal_key(
+    key: crossterm::event::KeyEvent,
+    app: &mut App,
+    state: &Arc<Mutex<UiState>>,
+) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Esc => {
+            state.lock().unwrap().interrupt_requested = true;
+        }
         KeyCode::Char(',') => {
             app.show_logs = !app.show_logs;
             if app.show_logs {

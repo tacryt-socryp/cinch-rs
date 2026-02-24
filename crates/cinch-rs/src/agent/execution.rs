@@ -30,6 +30,7 @@ pub(crate) async fn send_round_request(
     model_for_round: &str,
     tools_option: &Option<Vec<crate::ToolDef>>,
     event_handler: &dyn EventHandler,
+    stop_signal: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> Result<ChatCompletion, String> {
     let response_format = if config.output_schema.is_some() {
         Some(crate::ResponseFormat {
@@ -63,6 +64,8 @@ pub(crate) async fn send_round_request(
                     }
                     _ => {}
                 }
+                // Return false to cancel the stream when stop signal fires.
+                stop_signal.is_none_or(|s| !s())
             })
         })
         .await?;

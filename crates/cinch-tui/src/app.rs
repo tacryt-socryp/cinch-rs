@@ -39,6 +39,9 @@ pub(crate) struct App {
     pub(crate) question_cursor: usize,
     /// Scroll offset for the question choice list (top visible index).
     pub(crate) question_scroll: usize,
+    /// True when the agent is actively running (not waiting for input).
+    /// Used to show the interrupt hint in the status bar.
+    pub(crate) agent_busy: bool,
 }
 
 impl App {
@@ -54,6 +57,7 @@ impl App {
             should_quit: false,
             question_cursor: 0,
             question_scroll: 0,
+            agent_busy: false,
         }
     }
 }

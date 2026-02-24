@@ -116,7 +116,7 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
             TimedOut,
         }
 
-        let (running, quit, question_action) = {
+        let (running, quit, question_action, agent_busy) = {
             let mut s = state.lock().unwrap();
 
             // Merge drained log lines.
@@ -157,9 +157,17 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
                 }
             };
 
-            (s.running, s.quit_requested, qa)
+            // Agent is "busy" when running and not waiting for user input.
+            let busy = s.running
+                && s.active_question
+                    .as_ref()
+                    .is_none_or(|aq| aq.done);
+
+            (s.running, s.quit_requested, qa, busy)
             // lock released here
         };
+
+        app.agent_busy = agent_busy;
 
         // ── Apply results (no lock held) ─────────────────────────
 

@@ -460,6 +460,7 @@ impl<'a> Harness<'a> {
                 &model_for_round,
                 &tools_option,
                 self.event_handler,
+                self.stop_signal.as_ref().map(|s| s.as_ref()),
             )
             .await?;
 
@@ -614,6 +615,16 @@ impl<'a> Harness<'a> {
                 {
                     warn!("Failed to update session manifest: {e}");
                 }
+            }
+
+            // Post-round stop signal check — break immediately instead of
+            // waiting for the next round's pre-check. This ensures that an
+            // interrupt triggered mid-stream takes effect right away.
+            if let Some(ref signal) = self.stop_signal
+                && signal()
+            {
+                info!("Stop signal received after round — ending agent loop");
+                break;
             }
         }
 

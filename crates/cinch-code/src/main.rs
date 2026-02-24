@@ -261,7 +261,10 @@ async fn main() {
             attempt += 1;
             let result = Harness::new(&client, &tools, harness_config.clone())
                 .with_event_handler(&ui_handler)
-                .with_stop_signal(|| ui_state_stop.lock().unwrap().quit_requested)
+                .with_stop_signal(|| {
+                    let s = ui_state_stop.lock().unwrap();
+                    s.quit_requested || s.interrupt_requested
+                })
                 .run(messages.clone())
                 .await;
 
@@ -269,7 +272,19 @@ async fn main() {
                 Ok(r) => {
                     let text = r.text();
                     messages = r.messages;
-                    if !text.is_empty() {
+
+                    // Check if this was an interrupt (not a quit).
+                    let was_interrupted = {
+                        let mut s = ui_state.lock().unwrap();
+                        let interrupted = s.interrupt_requested;
+                        s.interrupt_requested = false;
+                        s.streaming_buffer.clear();
+                        interrupted
+                    };
+
+                    if was_interrupted {
+                        push_agent_text(&ui_state, "[Interrupted]");
+                    } else if !text.is_empty() {
                         push_agent_text(&ui_state, &text);
                     }
                     break true;
@@ -289,7 +304,8 @@ async fn main() {
                         ),
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if ui_state.lock().unwrap().quit_requested {
+                    let s = ui_state.lock().unwrap();
+                    if s.quit_requested || s.interrupt_requested {
                         break false;
                     }
                 }
@@ -298,6 +314,15 @@ async fn main() {
         // On persistent failure, still continue to the input prompt so the
         // user can retry or adjust their request.
         let _ = turn_ok;
+
+        // Clear interrupt flag if it was set during a failed retry cycle.
+        {
+            let mut s = ui_state.lock().unwrap();
+            if s.interrupt_requested {
+                s.interrupt_requested = false;
+                s.streaming_buffer.clear();
+            }
+        }
 
         // Check quit again after harness completes.
         if ui_state.lock().unwrap().quit_requested {

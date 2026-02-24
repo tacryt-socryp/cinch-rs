@@ -608,10 +608,18 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         InputMode::Normal => {
             let hint = if let Some(ref msg) = app.status_message {
                 msg.clone()
+            } else if app.agent_busy {
+                "[Esc] interrupt  [q] quit  [,] toggle logs  [Tab] switch pane  [Up/Down] scroll"
+                    .to_string()
             } else {
                 "[q] quit  [,] toggle logs  [Tab] switch pane  [Up/Down] scroll".to_string()
             };
-            (format!(" {hint} "), Style::default().fg(Color::DarkGray))
+            let style = if app.agent_busy {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            (format!(" {hint} "), style)
         }
         InputMode::QuestionSelect => (
             " [Up/Down] navigate  [Enter] select  [e] edit  [Esc] skip ".to_string(),

@@ -135,6 +135,9 @@ pub struct UiState {
     pub running: bool,
     /// The frontend sets this to `true` when the user requests quit.
     pub quit_requested: bool,
+    /// The frontend sets this to `true` when the user wants to interrupt
+    /// the current agent task without quitting the application.
+    pub interrupt_requested: bool,
 
     // ── Active question (human-in-the-loop) ──
     pub active_question: Option<ActiveQuestion>,
@@ -171,6 +174,7 @@ impl Default for UiState {
             logs: Vec::new(),
             running: true,
             quit_requested: false,
+            interrupt_requested: false,
             active_question: None,
             next_cycle_at: None,
             extensions: Box::new(NoExtension),

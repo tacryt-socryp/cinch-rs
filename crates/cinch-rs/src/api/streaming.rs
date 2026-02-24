@@ -160,7 +160,7 @@ impl OpenRouterClient {
     pub async fn chat_stream_live(
         &self,
         body: &ChatRequest,
-        mut on_event: impl FnMut(&StreamEvent),
+        mut on_event: impl FnMut(&StreamEvent) -> bool,
     ) -> Result<Vec<StreamEvent>, String> {
         let mut stream_body =
             serde_json::to_value(body).map_err(|e| format!("failed to serialize request: {e}"))?;
@@ -188,6 +188,7 @@ impl OpenRouterClient {
         let mut events = Vec::new();
         let mut buffer = String::new();
         let mut done = false;
+        let mut cancelled = false;
 
         while let Some(chunk) = resp
             .chunk()
@@ -213,15 +214,30 @@ impl OpenRouterClient {
                     let before = events.len();
                     parse_sse_data(data, &mut events);
                     // Emit newly parsed events to the callback.
+                    // If the callback returns false, cancel the stream.
                     for ev in &events[before..] {
-                        on_event(ev);
+                        if !on_event(ev) {
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                    if cancelled {
+                        break;
                     }
                 }
             }
 
-            if done {
+            if done || cancelled {
                 break;
             }
+        }
+
+        if cancelled {
+            debug!("Stream cancelled by callback");
+            if !events.iter().any(|e| matches!(e, StreamEvent::Done)) {
+                events.push(StreamEvent::Done);
+            }
+            return Ok(events);
         }
 
         // Process any remaining data in the buffer.
@@ -233,7 +249,9 @@ impl OpenRouterClient {
             let before = events.len();
             parse_sse_data(data, &mut events);
             for ev in &events[before..] {
-                on_event(ev);
+                if !on_event(ev) {
+                    break;
+                }
             }
         }
 
