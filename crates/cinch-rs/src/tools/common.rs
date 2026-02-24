@@ -62,6 +62,12 @@ use std::sync::Arc;
 pub struct ReadFileArgs {
     /// File path relative to repo root (e.g. 'docs/readme.md').
     pub path: String,
+    /// Starting line number (1-indexed). Default: 1.
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Maximum number of lines to return. Default: 2000.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Typed arguments for `list_files`.
@@ -85,6 +91,12 @@ pub struct GrepArgs {
     /// Case-insensitive search (default false).
     #[serde(default)]
     pub case_insensitive: Option<bool>,
+    /// Output mode: 'files' (paths only, default), 'content' (matching lines), 'count' (match counts per file).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Lines of context around each match (only used in 'content' mode). Default: 0.
+    #[serde(default)]
+    pub context_lines: Option<u32>,
 }
 
 /// Typed arguments for `find_files`.
@@ -168,21 +180,34 @@ impl ReadFile {
     }
 }
 
+/// Default line limit for `read_file`.
+const DEFAULT_READ_LINE_LIMIT: u32 = 2000;
+
+/// Maximum characters per line before truncation.
+const MAX_LINE_CHARS: usize = 500;
+
 impl Tool for ReadFile {
     fn definition(&self) -> ToolDef {
         ToolSpec::builder("read_file")
-            .purpose("Read a file from the repository")
-            .when_to_use("When you need to read a specific file whose path you already know")
+            .purpose("Read a file with numbered lines")
+            .when_to_use(
+                "When you need to read a specific file whose path you already know. \
+                 Returns numbered lines you can reference in edit_file operations",
+            )
             .when_not_to_use(
                 "When searching for a pattern across many files — use grep instead. \
                  When you need to list files in a directory — use list_files instead",
             )
             .parameters_for::<ReadFileArgs>()
             .example(
-                "read_file(path='docs/readme.md')",
-                "Returns the full text content of the file",
+                "read_file(path='src/main.rs')",
+                "L1: use std::fs;\nL2: use std::path::Path;\nL3:\nL4: fn main() {",
             )
-            .output_format("Raw file content as text")
+            .example(
+                "read_file(path='src/main.rs', offset=50, limit=20)",
+                "Returns lines 50-69 with L{n}: prefix",
+            )
+            .output_format("Numbered lines: L{n}: {content}. For large files use offset/limit to read specific sections.")
             .disambiguate(
                 "Need to find which files contain a keyword",
                 "grep",
@@ -229,7 +254,40 @@ impl Tool for ReadFile {
                     if let Some(ref t) = tracker {
                         t.record_read(&full_path.to_string_lossy(), &content);
                     }
-                    truncate_result(content, max)
+
+                    let total_lines = content.lines().count();
+                    let offset = args.offset.unwrap_or(1).max(1) as usize;
+                    let limit = args.limit.unwrap_or(DEFAULT_READ_LINE_LIMIT) as usize;
+
+                    // Format with line numbers: L{n}: {content}
+                    let mut output = String::new();
+                    for (i, line) in content.lines().enumerate() {
+                        let line_num = i + 1; // 1-indexed
+                        if line_num < offset {
+                            continue;
+                        }
+                        if line_num >= offset + limit {
+                            break;
+                        }
+                        // Truncate long lines.
+                        if line.len() > MAX_LINE_CHARS {
+                            output.push_str(&format!(
+                                "L{line_num}: {}... [line truncated at {MAX_LINE_CHARS} chars]\n",
+                                &line[..MAX_LINE_CHARS]
+                            ));
+                        } else {
+                            output.push_str(&format!("L{line_num}: {line}\n"));
+                        }
+                    }
+
+                    // Append truncation notice if there are more lines.
+                    if offset + limit <= total_lines {
+                        output.push_str(&format!(
+                            "[truncated: {total_lines} total lines. Use offset/limit for more.]"
+                        ));
+                    }
+
+                    truncate_result(output, max)
                 }
                 Err(e) => format!("Error reading '{}': {e}", full_path.display()),
             }
@@ -341,7 +399,11 @@ impl Tool for Grep {
     fn definition(&self) -> ToolDef {
         ToolSpec::builder("grep")
             .purpose("Search for a regex pattern in file contents")
-            .when_to_use("When you need to find text matching a pattern across multiple files")
+            .when_to_use(
+                "When you need to find text matching a pattern across multiple files. \
+                 Defaults to returning file paths only (compact). Use mode='content' \
+                 to see matching lines when needed",
+            )
             .when_not_to_use(
                 "When you already know the file path — use read_file instead. \
                  When you need to find files by name — use find_files instead",
@@ -349,9 +411,16 @@ impl Tool for Grep {
             .parameters_for::<GrepArgs>()
             .example(
                 "grep(pattern='TODO', glob='*.rs')",
-                "Returns matching lines with file:line_number prefix",
+                "src/main.rs\nsrc/tools/common.rs",
             )
-            .output_format("Matching lines prefixed with file_path:line_number:")
+            .example(
+                "grep(pattern='fn execute', mode='content', glob='*.rs')",
+                "src/tools/common.rs:42: fn execute(&self, arguments: &str) -> ToolFuture",
+            )
+            .output_format(
+                "Depends on mode: 'files' returns paths only (default), \
+                 'content' returns file:line:match, 'count' returns file:count",
+            )
             .disambiguate(
                 "Need to read a file you already know the path of",
                 "read_file",
@@ -386,11 +455,39 @@ impl Tool for Grep {
             }
             let full_path = Path::new(&workdir).join(search_path);
 
-            let mut cmd_args = vec![
-                "-rn".to_string(),
+            let mode = args.mode.as_deref().unwrap_or("files");
+
+            let mut cmd_args: Vec<String> = vec![
+                "-r".to_string(),
                 "--color=never".to_string(),
                 format!("--max-count={max_matches}"),
             ];
+
+            match mode {
+                "files" => {
+                    // Files-only mode: return paths only (most token-efficient).
+                    cmd_args.push("-l".to_string());
+                }
+                "content" => {
+                    // Content mode: return matching lines with line numbers.
+                    cmd_args.push("-n".to_string());
+                    if let Some(ctx) = args.context_lines
+                        && ctx > 0
+                    {
+                        cmd_args.push(format!("-C{ctx}"));
+                    }
+                }
+                "count" => {
+                    // Count mode: return match counts per file.
+                    cmd_args.push("-c".to_string());
+                }
+                _ => {
+                    return format!(
+                        "Error: invalid mode '{}'. Use 'files', 'content', or 'count'.",
+                        mode
+                    );
+                }
+            }
 
             if args.case_insensitive.unwrap_or(false) {
                 cmd_args.push("-i".to_string());
@@ -406,6 +503,18 @@ impl Tool for Grep {
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
             // grep returns exit code 1 for "no matches" — not an error.
             let result = run_command("grep", &arg_refs, &[1]).await;
+
+            // For count mode, strip lines with :0 (no matches in that file).
+            let result = if mode == "count" {
+                result
+                    .lines()
+                    .filter(|line| !line.ends_with(":0"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                result
+            };
+
             truncate_result(result, max_result_bytes)
         })
     }
@@ -801,7 +910,8 @@ impl Tool for EditFile {
             let args: EditFileArgs = match serde_json::from_str(&arguments) {
                 Ok(a) => a,
                 Err(_) => {
-                    return "Error: 'path', 'old_string', and 'new_string' are required".to_string();
+                    return "Error: 'path', 'old_string', and 'new_string' are required"
+                        .to_string();
                 }
             };
             if args.path.contains("..") {
@@ -1509,5 +1619,177 @@ mod tests {
         assert_eq!(def.function.name, "write_file");
         assert!(def.function.description.contains("When to use:"));
         assert!(def.function.description.contains("When NOT to use:"));
+    }
+
+    // ── read_file line numbers and offset/limit tests ──────────────
+
+    #[tokio::test]
+    async fn read_file_output_has_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.rs"), "use std::fs;\nfn main() {}\n").unwrap();
+
+        let tool = ReadFile::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": "test.rs"}"#).await;
+        assert!(result.contains("L1: use std::fs;"), "got: {result}");
+        assert!(result.contains("L2: fn main() {}"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_skips_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = (1..=10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("test.txt"), &content).unwrap();
+
+        let tool = ReadFile::new(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(r#"{"path": "test.txt", "offset": 3, "limit": 2}"#)
+            .await;
+        assert!(result.contains("L3: line 3"), "got: {result}");
+        assert!(result.contains("L4: line 4"), "got: {result}");
+        assert!(
+            !result.contains("L1:"),
+            "should not contain line 1, got: {result}"
+        );
+        assert!(
+            !result.contains("L5:"),
+            "should not contain line 5, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_truncation_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("test.txt"), &content).unwrap();
+
+        let tool = ReadFile::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": "test.txt", "limit": 5}"#).await;
+        assert!(result.contains("L1: line 1"), "got: {result}");
+        assert!(result.contains("L5: line 5"), "got: {result}");
+        assert!(!result.contains("L6:"), "should not contain line 6");
+        assert!(
+            result.contains("[truncated: 100 total lines"),
+            "expected truncation notice, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_long_line_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_line = "x".repeat(600);
+        std::fs::write(dir.path().join("test.txt"), &long_line).unwrap();
+
+        let tool = ReadFile::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": "test.txt"}"#).await;
+        assert!(
+            result.contains("[line truncated at 500 chars]"),
+            "expected line truncation, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_args_schema_has_offset_and_limit() {
+        let schema = crate::json_schema_for::<ReadFileArgs>();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("offset"));
+        assert!(props.contains_key("limit"));
+        // offset and limit should NOT be required.
+        let required = schema["required"].as_array().unwrap();
+        assert!(!required.contains(&serde_json::json!("offset")));
+        assert!(!required.contains(&serde_json::json!("limit")));
+    }
+
+    // ── grep mode tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn grep_default_mode_returns_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "hello again\n").unwrap();
+
+        let tool = Grep::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"pattern": "hello"}"#).await;
+        // Files mode: paths only, no line numbers or content.
+        assert!(result.contains("a.txt"), "got: {result}");
+        assert!(result.contains("b.txt"), "got: {result}");
+        // Should NOT contain line content or line numbers.
+        assert!(
+            !result.contains("hello world"),
+            "files mode should not contain content: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_content_mode_returns_matching_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+
+        let tool = Grep::new(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(r#"{"pattern": "fn main", "mode": "content"}"#)
+            .await;
+        // Content mode: includes line numbers and matching content.
+        assert!(result.contains("fn main"), "got: {result}");
+        assert!(
+            result.contains(":1:"),
+            "expected line number, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_count_mode_returns_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.rs"), "foo\nbar\nfoo\n").unwrap();
+
+        let tool = Grep::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"pattern": "foo", "mode": "count"}"#).await;
+        // Count mode: file:count format. Should show 2 matches.
+        assert!(result.contains(":2"), "expected count of 2, got: {result}");
+    }
+
+    #[tokio::test]
+    async fn grep_content_mode_with_context_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+
+        let tool = Grep::new(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(r#"{"pattern": "ccc", "mode": "content", "context_lines": 1}"#)
+            .await;
+        // Should include surrounding context lines.
+        assert!(
+            result.contains("bbb"),
+            "expected context before, got: {result}"
+        );
+        assert!(
+            result.contains("ddd"),
+            "expected context after, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_invalid_mode_returns_error() {
+        let tool = Grep::new("/tmp");
+        let result = tool
+            .execute(r#"{"pattern": "test", "mode": "invalid"}"#)
+            .await;
+        assert!(
+            result.contains("invalid mode"),
+            "expected mode error, got: {result}"
+        );
+    }
+
+    #[test]
+    fn grep_args_schema_has_mode_and_context_lines() {
+        let schema = crate::json_schema_for::<GrepArgs>();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("mode"));
+        assert!(props.contains_key("context_lines"));
     }
 }
