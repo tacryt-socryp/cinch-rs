@@ -309,9 +309,10 @@ async fn dispatch_tool_execution(
         return results;
     }
 
-    // Check for dependency annotations.
-    let annotated =
+    // Check for dependency annotations, with per-file sequential enforcement.
+    let mut annotated =
         tool_dag::annotate_tool_calls(&to_execute.iter().map(|c| (*c).clone()).collect::<Vec<_>>());
+    tool_dag::inject_sequential_deps(&mut annotated, &tool_dag::SequentialPolicy::PerFileForMutations);
     let has_deps = annotated.iter().any(|a| a.depends_on.is_some());
 
     if has_deps {

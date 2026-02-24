@@ -14,7 +14,16 @@
 //! to execute sequentially regardless of annotations — a conservative
 //! mode for tool sets with destructive operations.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Policy for which tools require sequential execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequentialPolicy {
+    /// No automatic sequencing (current behavior).
+    None,
+    /// Per-file sequencing for mutation tools, fully sequential for shell.
+    PerFileForMutations,
+}
 
 /// A tool call with optional dependency annotation.
 #[derive(Debug, Clone)]
@@ -140,7 +149,16 @@ pub fn extract_depends_on(arguments: &str) -> Option<String> {
 /// Convert raw tool calls into annotated tool calls by extracting
 /// `depends_on` from their arguments.
 pub fn annotate_tool_calls(calls: &[crate::ToolCall]) -> Vec<AnnotatedToolCall> {
-    calls
+    annotate_tool_calls_with_policy(calls, &SequentialPolicy::None)
+}
+
+/// Convert raw tool calls into annotated tool calls, applying the given
+/// sequential policy to inject additional dependency edges.
+pub fn annotate_tool_calls_with_policy(
+    calls: &[crate::ToolCall],
+    policy: &SequentialPolicy,
+) -> Vec<AnnotatedToolCall> {
+    let mut annotated: Vec<AnnotatedToolCall> = calls
         .iter()
         .map(|call| {
             let depends_on = extract_depends_on(&call.function.arguments);
@@ -151,7 +169,69 @@ pub fn annotate_tool_calls(calls: &[crate::ToolCall]) -> Vec<AnnotatedToolCall> 
                 depends_on,
             }
         })
-        .collect()
+        .collect();
+    inject_sequential_deps(&mut annotated, policy);
+    annotated
+}
+
+/// Tools whose calls must be sequenced per-file.
+const FILE_MUTATION_TOOLS: &[&str] = &["edit_file", "write_file"];
+
+/// Tools that must always run sequentially.
+const ALWAYS_SEQUENTIAL_TOOLS: &[&str] = &["shell"];
+
+/// Extract the file path from a tool call's arguments JSON.
+///
+/// Looks for a `"path"` key in the top-level object.
+fn extract_file_path(arguments: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    parsed
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Inject sequential dependency edges based on the given policy.
+///
+/// For [`SequentialPolicy::PerFileForMutations`]:
+/// - `edit_file` / `write_file` calls targeting the same file are chained
+///   sequentially (second depends on first, third depends on second, etc.)
+/// - `shell` calls are all chained sequentially
+/// - Existing `depends_on` values are never overwritten
+pub fn inject_sequential_deps(calls: &mut [AnnotatedToolCall], policy: &SequentialPolicy) {
+    if *policy == SequentialPolicy::None || calls.is_empty() {
+        return;
+    }
+
+    let file_mutation_set: HashSet<&str> = FILE_MUTATION_TOOLS.iter().copied().collect();
+    let always_seq_set: HashSet<&str> = ALWAYS_SEQUENTIAL_TOOLS.iter().copied().collect();
+
+    // Track last call ID per file path (for file-mutation tools).
+    let mut last_by_file: HashMap<String, String> = HashMap::new();
+    // Track last shell call ID.
+    let mut last_shell: Option<String> = Option::None;
+
+    for call in calls.iter_mut() {
+        let name = call.name.as_str();
+
+        if always_seq_set.contains(name) {
+            if let Some(ref prev_id) = last_shell
+                && call.depends_on.is_none()
+            {
+                call.depends_on = Some(prev_id.clone());
+            }
+            last_shell = Some(call.call_id.clone());
+        } else if file_mutation_set.contains(name)
+            && let Some(path) = extract_file_path(&call.arguments)
+        {
+            if let Some(prev_id) = last_by_file.get(&path)
+                && call.depends_on.is_none()
+            {
+                call.depends_on = Some(prev_id.clone());
+            }
+            last_by_file.insert(path, call.call_id.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +350,164 @@ mod tests {
                 .unwrap();
         assert_eq!(waves.len(), 2);
         assert_eq!(waves[0].len(), 2);
+        assert_eq!(waves[1].len(), 1);
+        assert_eq!(waves[1][0].call_id, "b");
+    }
+
+    // ── inject_sequential_deps tests ──────────────────────────────
+
+    /// Build a tool call with a specific name and arguments JSON.
+    fn named_call(id: &str, name: &str, args: &str) -> AnnotatedToolCall {
+        AnnotatedToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments: args.into(),
+            depends_on: None,
+        }
+    }
+
+    fn named_call_with_dep(
+        id: &str,
+        name: &str,
+        args: &str,
+        dep: &str,
+    ) -> AnnotatedToolCall {
+        AnnotatedToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments: args.into(),
+            depends_on: Some(dep.into()),
+        }
+    }
+
+    #[test]
+    fn inject_deps_same_file_edits_sequenced() {
+        let mut calls = vec![
+            named_call("a", "edit_file", r#"{"path": "src/main.rs"}"#),
+            named_call("b", "edit_file", r#"{"path": "src/main.rs"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        assert!(calls[0].depends_on.is_none());
+        assert_eq!(calls[1].depends_on.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn inject_deps_different_file_edits_parallel() {
+        let mut calls = vec![
+            named_call("a", "edit_file", r#"{"path": "src/main.rs"}"#),
+            named_call("b", "edit_file", r#"{"path": "src/lib.rs"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        assert!(calls[0].depends_on.is_none());
+        assert!(calls[1].depends_on.is_none());
+    }
+
+    #[test]
+    fn inject_deps_shell_always_sequential() {
+        let mut calls = vec![
+            named_call("a", "shell", r#"{"command": "echo 1"}"#),
+            named_call("b", "shell", r#"{"command": "echo 2"}"#),
+            named_call("c", "shell", r#"{"command": "echo 3"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        assert!(calls[0].depends_on.is_none());
+        assert_eq!(calls[1].depends_on.as_deref(), Some("a"));
+        assert_eq!(calls[2].depends_on.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn inject_deps_mixed_shell_and_edits() {
+        let mut calls = vec![
+            named_call("s1", "shell", r#"{"command": "ls"}"#),
+            named_call("e1", "edit_file", r#"{"path": "a.rs"}"#),
+            named_call("s2", "shell", r#"{"command": "pwd"}"#),
+            named_call("e2", "edit_file", r#"{"path": "a.rs"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        // Shells chained: s1 -> s2
+        assert!(calls[0].depends_on.is_none()); // s1
+        assert!(calls[1].depends_on.is_none()); // e1 (first edit of a.rs)
+        assert_eq!(calls[2].depends_on.as_deref(), Some("s1")); // s2 -> s1
+        assert_eq!(calls[3].depends_on.as_deref(), Some("e1")); // e2 -> e1
+    }
+
+    #[test]
+    fn inject_deps_preserves_existing_depends_on() {
+        let mut calls = vec![
+            named_call("a", "edit_file", r#"{"path": "x.rs"}"#),
+            named_call_with_dep("b", "edit_file", r#"{"path": "x.rs"}"#, "other"),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        // b already has depends_on="other", should not be overwritten.
+        assert_eq!(calls[1].depends_on.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn inject_deps_three_edits_same_file() {
+        let mut calls = vec![
+            named_call("a", "edit_file", r#"{"path": "f.rs"}"#),
+            named_call("b", "edit_file", r#"{"path": "f.rs"}"#),
+            named_call("c", "edit_file", r#"{"path": "f.rs"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        assert!(calls[0].depends_on.is_none());
+        assert_eq!(calls[1].depends_on.as_deref(), Some("a"));
+        assert_eq!(calls[2].depends_on.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn inject_deps_policy_none_no_changes() {
+        let mut calls = vec![
+            named_call("a", "edit_file", r#"{"path": "x.rs"}"#),
+            named_call("b", "edit_file", r#"{"path": "x.rs"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::None);
+        assert!(calls[0].depends_on.is_none());
+        assert!(calls[1].depends_on.is_none());
+    }
+
+    #[test]
+    fn inject_deps_write_file_sequenced() {
+        let mut calls = vec![
+            named_call("a", "write_file", r#"{"path": "out.txt"}"#),
+            named_call("b", "write_file", r#"{"path": "out.txt"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        assert!(calls[0].depends_on.is_none());
+        assert_eq!(calls[1].depends_on.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn inject_deps_read_tools_stay_parallel() {
+        let mut calls = vec![
+            named_call("a", "read_file", r#"{"path": "x.rs"}"#),
+            named_call("b", "grep", r#"{"pattern": "fn"}"#),
+            named_call("c", "list_dir", r#"{"path": "src"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+        assert!(calls[0].depends_on.is_none());
+        assert!(calls[1].depends_on.is_none());
+        assert!(calls[2].depends_on.is_none());
+    }
+
+    #[test]
+    fn end_to_end_waves_with_injection() {
+        // Two edits to same file + one to different file.
+        // After injection: a and c are independent, b depends on a.
+        let mut calls = vec![
+            named_call("a", "edit_file", r#"{"path": "x.rs"}"#),
+            named_call("b", "edit_file", r#"{"path": "x.rs"}"#),
+            named_call("c", "edit_file", r#"{"path": "y.rs"}"#),
+        ];
+        inject_sequential_deps(&mut calls, &SequentialPolicy::PerFileForMutations);
+
+        let waves = build_execution_waves(calls).unwrap();
+        assert_eq!(waves.len(), 2);
+        // Wave 0: a and c (independent)
+        let wave0_ids: Vec<&str> = waves[0].iter().map(|c| c.call_id.as_str()).collect();
+        assert!(wave0_ids.contains(&"a"));
+        assert!(wave0_ids.contains(&"c"));
+        // Wave 1: b (depends on a)
         assert_eq!(waves[1].len(), 1);
         assert_eq!(waves[1][0].call_id, "b");
     }
