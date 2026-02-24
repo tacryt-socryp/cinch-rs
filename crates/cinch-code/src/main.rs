@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use cinch_code::CodeConfig;
 use cinch_rs::agent::harness::Harness;
+use cinch_rs::agent::session::SessionManager;
 use cinch_rs::prelude::*;
 use clap::Parser;
 use tracing_subscriber::layer::SubscriberExt;
@@ -51,6 +52,11 @@ struct Cli {
     /// Sampling temperature.
     #[arg(long, default_value_t = 0.3)]
     temperature: f32,
+
+    /// Resume a previous session. Pass a session/trace ID, or "latest" to
+    /// resume the most recently updated session.
+    #[arg(long)]
+    resume: Option<String>,
 }
 
 /// Detect the git repository root for the current directory.
@@ -61,6 +67,35 @@ fn detect_git_root() -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Load messages from a saved session checkpoint.
+///
+/// Pass a trace ID directly, or `"latest"` to resolve the most recently
+/// updated session.
+fn load_session_messages(
+    sessions_dir: &std::path::Path,
+    resume_id: &str,
+) -> Result<Vec<Message>, String> {
+    let mgr = SessionManager::new(sessions_dir)
+        .map_err(|e| format!("cannot open sessions dir: {e}"))?;
+
+    let trace_id = if resume_id.eq_ignore_ascii_case("latest") {
+        let mut sessions = mgr.list_sessions()?;
+        if sessions.is_empty() {
+            return Err("no sessions found".to_string());
+        }
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions[0].trace_id.clone()
+    } else {
+        resume_id.to_string()
+    };
+
+    let checkpoint = mgr
+        .load_latest_checkpoint(&trace_id)?
+        .ok_or_else(|| format!("no checkpoint found for session {trace_id}"))?;
+
+    Ok(checkpoint.messages)
 }
 
 /// Ask the user for free-text input via the TUI question system.
@@ -160,25 +195,56 @@ async fn main() {
     // Event handler: UI state updater.
     let ui_handler = UiEventHandler::new(ui_state.clone());
 
-    // Conversation loop.
-    let mut messages = vec![Message::system(cinch_code::coding_system_prompt())];
-
-    // First turn: --prompt or interactive input.
-    let first_prompt = if let Some(p) = cli.prompt {
-        p
-    } else {
-        match get_user_input(&ui_state).await {
-            Some(text) => text,
-            None => {
-                ui_state.lock().unwrap().quit_requested = true;
+    // Conversation loop — optionally resume from a previous session.
+    let mut messages = if let Some(ref resume_id) = cli.resume {
+        match load_session_messages(&harness_config.session.sessions_dir, resume_id) {
+            Ok(msgs) => {
+                push_agent_text(
+                    &ui_state,
+                    &format!("Resumed session ({} messages from checkpoint)", msgs.len()),
+                );
+                msgs
+            }
+            Err(e) => {
+                push_agent_text(&ui_state, &format!("Failed to resume session: {e}"));
+                ui_state.lock().unwrap().running = false;
                 tui_handle.join().ok();
                 return;
             }
         }
+    } else {
+        vec![Message::system(cinch_code::coding_system_prompt())]
     };
 
-    push_user_message(&ui_state, &first_prompt);
-    messages.push(Message::user(&first_prompt));
+    // First turn: when resuming, ask for user input first; otherwise use
+    // --prompt or interactive input.
+    {
+        let first_prompt = if cli.resume.is_some() {
+            // Resuming — get a new user message to continue the conversation.
+            match get_user_input(&ui_state).await {
+                Some(text) => text,
+                None => {
+                    ui_state.lock().unwrap().quit_requested = true;
+                    tui_handle.join().ok();
+                    return;
+                }
+            }
+        } else if let Some(p) = cli.prompt {
+            p
+        } else {
+            match get_user_input(&ui_state).await {
+                Some(text) => text,
+                None => {
+                    ui_state.lock().unwrap().quit_requested = true;
+                    tui_handle.join().ok();
+                    return;
+                }
+            }
+        };
+
+        push_user_message(&ui_state, &first_prompt);
+        messages.push(Message::user(&first_prompt));
+    }
 
     let ui_state_stop = ui_state.clone();
 
