@@ -4,11 +4,13 @@
 //! converts them into cinch-rs types via [`build_harness_config`](CodeConfig::build_harness_config)
 //! and [`build_tool_set`](CodeConfig::build_tool_set).
 
+use std::path::PathBuf;
+
 use cinch_rs::agent::config::HarnessConfig;
 use cinch_rs::tools::core::ToolSet;
 
 use crate::prompt::coding_system_prompt;
-use crate::tools::GitToolsExt;
+use crate::tools::{GIT_COMMIT, GitToolsExt};
 
 /// Configuration for a coding agent session.
 ///
@@ -17,7 +19,7 @@ use crate::tools::GitToolsExt;
 /// and [`ToolSet`] ready for use with the cinch-rs harness.
 #[derive(Debug, Clone)]
 pub struct CodeConfig {
-    /// Model identifier. Default: `"anthropic/claude-sonnet-4"`.
+    /// Model identifier. Default: `"minimax/minimax-m2.5"`.
     pub model: String,
     /// Maximum tool-use round-trips. Default: `50`.
     pub max_rounds: u32,
@@ -34,7 +36,7 @@ pub struct CodeConfig {
 impl Default for CodeConfig {
     fn default() -> Self {
         Self {
-            model: "anthropic/claude-sonnet-4".to_string(),
+            model: "minimax/minimax-m2.5".to_string(),
             max_rounds: 50,
             max_tokens: 16384,
             temperature: 0.3,
@@ -47,14 +49,28 @@ impl Default for CodeConfig {
 impl CodeConfig {
     /// Build a [`HarnessConfig`] from this coding config.
     ///
-    /// Sets sequential tool execution, the coding system prompt, and
-    /// coding-tuned defaults for rounds, tokens, and temperature.
+    /// Configures the harness with:
+    /// - Coding system prompt and model settings
+    /// - Project instructions from AGENTS.md hierarchy
+    /// - MEMORY.md index loading from the project root
+    /// - Session directories co-located with the project
+    /// - Approval gating on `git_commit`
     pub fn build_harness_config(&self) -> HarnessConfig {
-        HarnessConfig::new(self.model.clone(), coding_system_prompt())
+        let memory_file = PathBuf::from(&self.workdir).join("MEMORY.md");
+        let sessions_dir = PathBuf::from(&self.workdir).join(".agents/sessions");
+
+        let mut config = HarnessConfig::new(self.model.clone(), coding_system_prompt())
             .with_max_rounds(self.max_rounds)
             .with_max_tokens(self.max_tokens)
             .with_temperature(self.temperature)
             .with_streaming(self.streaming)
+            .with_project_root(&self.workdir)
+            .with_memory_file(memory_file)
+            .with_approval_required_tools(vec![GIT_COMMIT.to_string()]);
+
+        config.session.sessions_dir = sessions_dir;
+
+        config
     }
 
     /// Build a [`ToolSet`] with common filesystem tools and git tools.
@@ -86,6 +102,48 @@ mod tests {
         assert_eq!(harness.max_tokens, 16384);
         assert!(harness.streaming);
         assert!(harness.system_prompt.is_some());
+    }
+
+    #[test]
+    fn build_harness_config_loads_project_instructions() {
+        let config = CodeConfig::default();
+        let harness = config.build_harness_config();
+        // project_instructions is set (even if no AGENTS.md exists, it's a
+        // non-None value with an empty prompt).
+        assert!(harness.project_instructions.is_some());
+    }
+
+    #[test]
+    fn build_harness_config_sets_memory_file() {
+        let config = CodeConfig {
+            workdir: "/tmp/test-project".to_string(),
+            ..Default::default()
+        };
+        let harness = config.build_harness_config();
+        assert_eq!(
+            harness.memory_config.memory_file,
+            Some(PathBuf::from("/tmp/test-project/MEMORY.md"))
+        );
+    }
+
+    #[test]
+    fn build_harness_config_sets_sessions_dir() {
+        let config = CodeConfig {
+            workdir: "/tmp/test-project".to_string(),
+            ..Default::default()
+        };
+        let harness = config.build_harness_config();
+        assert_eq!(
+            harness.session.sessions_dir,
+            PathBuf::from("/tmp/test-project/.agents/sessions")
+        );
+    }
+
+    #[test]
+    fn build_harness_config_gates_git_commit() {
+        let config = CodeConfig::default();
+        let harness = config.build_harness_config();
+        assert!(harness.approval_required_tools.contains(&"git_commit".to_string()));
     }
 
     #[test]
