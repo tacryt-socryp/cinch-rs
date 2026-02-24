@@ -14,8 +14,6 @@
 //!   [`TokenBudgetSemaphore`] for tree-wide budget control.
 //! - [`plan_execute`] — two-phase workflow: plan with read-only tools first,
 //!   then execute with the full tool set.
-//! - [`profile`] — persistent agent identity with per-tool usage stats and
-//!   cost tracking across sessions.
 //! - [`memory`] — file-based cross-session memory (MEMORY.md index, topic files).
 //! - [`project_instructions`] — project-level instructions loaded from AGENTS.md
 //!   hierarchy with conditional rules and compaction instructions.
@@ -31,14 +29,13 @@ pub mod gather;
 pub mod harness;
 pub mod memory;
 pub mod plan_execute;
-pub mod profile;
 pub mod project_instructions;
 pub mod prompt;
 pub mod session;
 pub mod sub_agent;
 
 // Re-export commonly used items at the module level.
-pub use config::{HarnessConfig, HarnessProfileConfig, MemoryConfig};
+pub use config::{HarnessConfig, MemoryConfig};
 pub use events::{
     CompositeEventHandler, EventHandler, EventObserver, EventResponse, FnEventHandler,
     HarnessEvent, HarnessResult, LoggingHandler, NoopHandler, StatefulToolResultBuilder,
@@ -46,7 +43,6 @@ pub use events::{
 };
 pub use gather::{ContextGatherer, GatherEvent, GatherObserver, UiGatherObserver};
 pub use harness::Harness;
-pub use profile::AgentProfile;
 pub use project_instructions::{ConditionalRule, ProjectInstructions};
 pub use prompt::{
     PromptRegistry, PromptSection, ReminderFrequency, ReminderRegistry, RoundContext, Stability,

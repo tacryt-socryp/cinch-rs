@@ -14,7 +14,6 @@ use super::events::{EventHandler, EventResponse, HarnessEvent, HarnessResult};
 use super::execution::{execute_and_record_tool_calls, save_round_checkpoint, send_round_request};
 use crate::agent::session::{SessionManager, SessionManifest, SessionStatus, epoch_secs, extract_message_preview};
 use crate::agent::plan_execute::{Phase, PlanExecuteConfig};
-use crate::agent::profile::AgentProfile;
 use crate::agent::prompt::reminders::{ReminderRegistry, RoundContext};
 use crate::agent::sub_agent::SharedResources;
 use crate::context::eviction::{self, ToolResultMeta};
@@ -156,7 +155,7 @@ impl<'a> Harness<'a> {
     ///   compaction check (eviction + summarization).
     /// - **After tool execution:** Record tool result metadata for eviction,
     ///   update tool filter usage counts, save checkpoint.
-    /// - **On completion:** Clean up checkpoints on success, save profile.
+    /// - **On completion:** Clean up checkpoints on success.
     pub async fn run(mut self, mut messages: Vec<Message>) -> Result<HarnessResult, String> {
         let pricing = crate::api::tracing::pricing_for_model(&self.config.model);
 
@@ -201,7 +200,6 @@ impl<'a> Harness<'a> {
         inject_prompt_extras(
             &self.config,
             &mut messages,
-            &modules.agent_profile,
             memory_index_content.as_deref(),
             self.config.project_instructions.as_ref(),
         );
@@ -570,7 +568,6 @@ pub(crate) struct ModuleState {
     pub(crate) session_manifest: Option<SessionManifest>,
     pub(crate) cleanup_on_success: bool,
     pub(crate) tool_cache: Option<ToolResultCache>,
-    pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) reminders: ReminderRegistry,
     pub(crate) file_tracker: Option<FileAccessTracker>,
 }
@@ -618,18 +615,6 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         None
     };
 
-    let agent_profile = if let Some(ref path) = config.profile.path {
-        match AgentProfile::load_or_create(path, &config.profile.agent_id) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                warn!("Failed to load agent profile: {e}. Continuing without profile.");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     ModuleState {
         summarizer,
         tool_metas: Vec::new(),
@@ -637,24 +622,21 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         session_manifest: None,
         cleanup_on_success: config.session.cleanup_on_success,
         tool_cache,
-        agent_profile,
         reminders: ReminderRegistry::with_defaults(),
         file_tracker: Some(FileAccessTracker::new(5)),
     }
 }
 
-/// Inject memory instructions, project instructions, MEMORY.md content,
-/// and agent profile instructions into the system prompt.
+/// Inject memory instructions, project instructions, and MEMORY.md content
+/// into the system prompt.
 ///
 /// Injection order in the system message:
 /// 1. Memory prompt (instructions — existing convention)
 /// 2. Project instructions prompt (from AGENTS.md hierarchy)
 /// 3. MEMORY.md content (loaded index)
-/// 4. Agent profile instructions (user-defined per-agent instructions)
 fn inject_prompt_extras(
     config: &HarnessConfig,
     messages: &mut [Message],
-    profile: &Option<AgentProfile>,
     memory_index: Option<&str>,
     project_instructions: Option<&super::project_instructions::ProjectInstructions>,
 ) {
@@ -692,17 +674,9 @@ fn inject_prompt_extras(
         content.push_str("\n\n## Memory Index\n\n");
         content.push_str(index);
     }
-
-    // 4. Agent profile instructions.
-    if let Some(profile) = profile
-        && let Some(instructions) = profile.instructions_prompt_section()
-        && let Some(content) = sys_content!(messages)
-    {
-        content.push_str(&instructions);
-    }
 }
 
-/// Post-loop finalization: emit limit event, clean up checkpoints, save profile,
+/// Post-loop finalization: emit limit event, clean up checkpoints,
 /// parse structured output, and build the final [`HarnessResult`].
 fn finalize_run(
     config: &HarnessConfig,
@@ -740,23 +714,6 @@ fn finalize_run(
             {
                 warn!("Failed to clean up session checkpoints: {e}");
             }
-        }
-    }
-
-    // Record run outcome in agent profile and save.
-    if let Some(ref mut profile) = modules.agent_profile {
-        profile.record_run(
-            &config.model,
-            acc.rounds_used,
-            acc.total_prompt_tokens,
-            acc.total_completion_tokens,
-            acc.finished,
-            acc.cost_tracker.estimated_cost_usd,
-        );
-        if let Some(ref path) = config.profile.path
-            && let Err(e) = profile.save(path)
-        {
-            warn!("Failed to save agent profile: {e}");
         }
     }
 

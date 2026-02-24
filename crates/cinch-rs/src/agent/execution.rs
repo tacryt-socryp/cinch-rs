@@ -250,12 +250,6 @@ pub(crate) async fn execute_and_record_tool_calls(
             filter.record_usage(&name);
         }
 
-        // Record tool call in agent profile.
-        if let Some(ref mut profile) = modules.agent_profile {
-            let is_error = result.starts_with("Error:");
-            profile.record_tool_call(&name, result.len(), 0, is_error);
-        }
-
         // Mid-turn compaction: check if context needs compacting after this
         // tool result, but only when there are remaining results to process.
         // The between-rounds compaction handles the case after the last result.

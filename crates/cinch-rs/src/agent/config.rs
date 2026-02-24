@@ -156,27 +156,6 @@ impl HarnessCacheConfig {
     }
 }
 
-// ── Profile config ────────────────────────────────────────────────
-
-/// Configuration for agent profile (cross-session learning) within the harness.
-#[derive(Debug, Clone, Default)]
-pub struct HarnessProfileConfig {
-    /// Path to the profile JSON file. When set, the harness loads the profile
-    /// at the start of a run and saves it on completion.
-    pub path: Option<PathBuf>,
-    /// Agent identifier used when creating a new profile.
-    pub agent_id: String,
-}
-
-impl HarnessProfileConfig {
-    pub fn new(path: impl Into<PathBuf>, agent_id: impl Into<String>) -> Self {
-        Self {
-            path: Some(path.into()),
-            agent_id: agent_id.into(),
-        }
-    }
-}
-
 // ── Memory config ─────────────────────────────────────────────────
 
 /// Configuration for the file-based memory system.
@@ -276,10 +255,6 @@ pub struct HarnessConfig {
     /// attempt to parse the output as JSON and store it in
     /// `HarnessResult::structured_output`.
     pub output_schema: Option<serde_json::Value>,
-    /// Agent profile configuration. When a path is set, the harness loads
-    /// the profile at start (injecting user instructions) and saves it on
-    /// completion (recording tool usage and run outcome).
-    pub profile: HarnessProfileConfig,
     /// Memory system configuration (MEMORY.md index loading).
     pub memory_config: MemoryConfig,
     /// Project-level instructions loaded from AGENTS.md hierarchy.
@@ -385,12 +360,6 @@ impl HarnessConfig {
         self
     }
 
-    /// Set the agent profile configuration.
-    pub fn with_profile(mut self, profile: HarnessProfileConfig) -> Self {
-        self.profile = profile;
-        self
-    }
-
     /// Set a custom planning-phase prompt for the plan-execute workflow.
     ///
     /// This prompt is injected as a user message at the start of the planning
@@ -473,7 +442,6 @@ impl Default for HarnessConfig {
             system_prompt: None,
             memory_prompt: Some(crate::agent::memory::default_memory_prompt()),
             output_schema: None,
-            profile: HarnessProfileConfig::default(),
             memory_config: MemoryConfig::default(),
             project_instructions: None,
         }
