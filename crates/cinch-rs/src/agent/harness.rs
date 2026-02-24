@@ -27,6 +27,7 @@ use crate::tools::cache::ToolResultCache;
 use crate::tools::core::ToolSet;
 use crate::tools::filter::ToolFilter;
 use crate::{Annotation, ChatRequest, Message, OpenRouterClient};
+use std::collections::HashSet;
 use tracing::{info, warn};
 
 // ── Harness ────────────────────────────────────────────────────────
@@ -245,8 +246,12 @@ impl<'a> Harness<'a> {
             );
         }
 
-        // Get tool definitions (may be filtered).
-        let all_tool_defs = self.tools.definitions();
+        // Get tool definitions (may be filtered, may be compact for progressive loading).
+        let all_tool_defs = if self.config.progressive_tools {
+            self.tools.compact_definitions()
+        } else {
+            self.tools.definitions()
+        };
         let full_tool_defs = if let Some(ref filter) = self.tool_filter {
             let task_keywords = extract_task_keywords(&messages);
             let keyword_refs: Vec<&str> = task_keywords.iter().map(|s| s.as_str()).collect();
@@ -624,6 +629,8 @@ pub(crate) struct ModuleState {
     pub(crate) tool_cache: Option<ToolResultCache>,
     pub(crate) reminders: ReminderRegistry,
     pub(crate) file_tracker: Option<FileAccessTracker>,
+    /// Tools whose extended descriptions have already been injected.
+    pub(crate) expanded_tools: HashSet<String>,
 }
 
 /// Values accumulated across rounds during a harness run.
@@ -678,6 +685,7 @@ fn init_modules(config: &HarnessConfig) -> ModuleState {
         tool_cache,
         reminders: ReminderRegistry::with_defaults(),
         file_tracker: Some(FileAccessTracker::new(5)),
+        expanded_tools: HashSet::new(),
     }
 }
 
@@ -1359,6 +1367,19 @@ mod tests {
     }
 
     // ── New API: builder methods ──────────────────────────────────
+
+    #[test]
+    fn progressive_tools_default_false() {
+        let config = HarnessConfig::default();
+        assert!(!config.progressive_tools);
+    }
+
+    #[test]
+    fn progressive_tools_builder() {
+        let config =
+            HarnessConfig::new("test-model", "prompt").with_progressive_tools(true);
+        assert!(config.progressive_tools);
+    }
 
     #[test]
     fn harness_config_builder_methods() {

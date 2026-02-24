@@ -269,6 +269,8 @@ pub struct HarnessConfig {
     /// descriptions to fit within the token limit before each API request.
     /// Default: `None` (no budget enforcement).
     pub tool_budget: Option<crate::tools::ToolBudget>,
+    /// Use compact tool definitions, expanding on first use. Default: `false`.
+    pub progressive_tools: bool,
 }
 
 impl HarnessConfig {
@@ -419,6 +421,13 @@ impl HarnessConfig {
         self
     }
 
+    /// Enable progressive tool loading: send compact tool descriptions by
+    /// default, expanding to full descriptions on first use.
+    pub fn with_progressive_tools(mut self, enabled: bool) -> Self {
+        self.progressive_tools = enabled;
+        self
+    }
+
     /// Set a tool definition budget.
     pub fn with_tool_budget(mut self, budget: crate::tools::ToolBudget) -> Self {
         self.tool_budget = Some(budget);
@@ -465,6 +474,7 @@ impl Default for HarnessConfig {
             memory_config: MemoryConfig::default(),
             project_instructions: None,
             tool_budget: None,
+            progressive_tools: false,
         }
     }
 }

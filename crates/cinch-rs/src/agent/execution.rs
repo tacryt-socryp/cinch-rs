@@ -254,6 +254,18 @@ pub(crate) async fn execute_and_record_tool_calls(
             filter.record_usage(&name);
         }
 
+        // Progressive tool loading: inject extended description on first use.
+        if config.progressive_tools
+            && !modules.expanded_tools.contains(&name)
+            && let Some(ext) = tools.extended_description(&name)
+        {
+            layout.push_message(Message::user(format!(
+                "<tool_guide name=\"{}\">\n{}\n</tool_guide>",
+                name, ext
+            )));
+            modules.expanded_tools.insert(name.clone());
+        }
+
         // Mid-turn compaction: check if context needs compacting after this
         // tool result, but only when there are remaining results to process.
         // The between-rounds compaction handles the case after the last result.

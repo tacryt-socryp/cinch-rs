@@ -151,6 +151,13 @@ pub trait Tool: Send + Sync {
     fn is_mutation(&self) -> bool {
         false
     }
+
+    /// Extended description loaded on first use. Returns `None` by default.
+    /// Override to provide detailed guidance (examples, disambiguation)
+    /// that supplements the compact definition().
+    fn extended_description(&self) -> Option<String> {
+        None
+    }
 }
 
 // ── ToolSet ────────────────────────────────────────────────────────
@@ -276,6 +283,30 @@ impl ToolSet {
     /// Return all tool definitions for the LLM API.
     pub fn definitions(&self) -> Vec<ToolDef> {
         self.tools.values().map(|t| t.definition()).collect()
+    }
+
+    /// Return tool definitions with compact descriptions.
+    /// Tools that provide an `extended_description()` get their definition
+    /// truncated to the first line. Others are unchanged.
+    pub fn compact_definitions(&self) -> Vec<ToolDef> {
+        self.tools
+            .values()
+            .map(|t| {
+                let mut def = t.definition();
+                if t.extended_description().is_some() {
+                    // Strip to first line as compact description.
+                    if let Some(pos) = def.function.description.find('\n') {
+                        def.function.description.truncate(pos);
+                    }
+                }
+                def
+            })
+            .collect()
+    }
+
+    /// Get extended description for a tool by name, if available.
+    pub fn extended_description(&self, name: &str) -> Option<String> {
+        self.tools.get(name)?.extended_description()
     }
 
     /// Number of registered tools.
@@ -1158,6 +1189,64 @@ mod tests {
         let config = CommonToolsConfig::default().shell_blocked_commands(vec!["only-this".into()]);
         assert_eq!(config.shell_blocked_commands.len(), 1);
         assert_eq!(config.shell_blocked_commands[0], "only-this");
+    }
+
+    // ── Progressive tool loading ──────────────────────────────────
+
+    #[test]
+    fn extended_description_default_is_none() {
+        let tool = EchoTool;
+        assert!(tool.extended_description().is_none());
+    }
+
+    struct ExtendedTool;
+
+    impl Tool for ExtendedTool {
+        fn definition(&self) -> ToolDef {
+            ToolDef::new(
+                "extended",
+                "First line summary.\nWhen to use: when testing.\nWhen NOT to use: never.",
+                serde_json::json!({"type": "object", "properties": {}}),
+            )
+        }
+
+        fn execute(&self, _arguments: &str) -> ToolFuture<'_> {
+            Box::pin(async { "ok".into() })
+        }
+
+        fn extended_description(&self) -> Option<String> {
+            Some("When to use: when testing.\nWhen NOT to use: never.".into())
+        }
+    }
+
+    #[test]
+    fn compact_definitions_strips_multiline() {
+        let set = ToolSet::new().with(ExtendedTool);
+        let defs = set.compact_definitions();
+        assert_eq!(defs.len(), 1);
+        // Should only have the first line (before the newline).
+        assert_eq!(defs[0].function.description, "First line summary.");
+        assert!(!defs[0].function.description.contains("When to use"));
+    }
+
+    #[test]
+    fn compact_definitions_unchanged_without_extended() {
+        let set = ToolSet::new().with(EchoTool);
+        let full = set.definitions();
+        let compact = set.compact_definitions();
+        assert_eq!(full[0].function.description, compact[0].function.description);
+    }
+
+    #[test]
+    fn extended_description_by_name() {
+        let set = ToolSet::new().with(ExtendedTool).with(EchoTool);
+        assert!(set.extended_description("extended").is_some());
+        assert!(set
+            .extended_description("extended")
+            .unwrap()
+            .contains("When to use"));
+        assert!(set.extended_description("echo").is_none());
+        assert!(set.extended_description("nonexistent").is_none());
     }
 
     #[test]

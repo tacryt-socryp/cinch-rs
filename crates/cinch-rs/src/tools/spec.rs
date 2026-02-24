@@ -97,6 +97,53 @@ impl ToolSpec {
         desc
     }
 
+    /// Compact description: purpose only (single line).
+    /// Used in progressive loading — full details loaded on first use.
+    pub fn to_compact_description(&self) -> String {
+        format!("{}.", self.purpose)
+    }
+
+    /// Extended description: everything beyond purpose.
+    /// Injected as a system reminder on first use of this tool.
+    pub fn to_extended_description(&self) -> String {
+        let mut desc = String::new();
+        desc.push_str(&format!("When to use: {}", self.when_to_use));
+        desc.push_str(&format!("\nWhen NOT to use: {}", self.when_not_to_use));
+
+        if !self.examples.is_empty() {
+            desc.push_str("\nExamples:");
+            for ex in &self.examples {
+                desc.push_str(&format!("\n  - Input: {} → {}", ex.input, ex.output));
+            }
+        }
+
+        if !self.output_format.is_empty() {
+            desc.push_str(&format!("\nOutput format: {}", self.output_format));
+        }
+
+        if !self.disambiguation.is_empty() {
+            desc.push_str("\nDisambiguation:");
+            for d in &self.disambiguation {
+                desc.push_str(&format!(
+                    "\n  - {}: Use '{}' instead — {}",
+                    d.scenario, d.correct_tool, d.reason
+                ));
+            }
+        }
+
+        desc
+    }
+
+    /// Convert to a compact `ToolDef` with purpose-only description.
+    /// Used in progressive loading — extended details are injected on first use.
+    pub fn to_compact_tool_def(&self) -> ToolDef {
+        ToolDef::new(
+            self.name.clone(),
+            self.to_compact_description(),
+            self.parameters.clone(),
+        )
+    }
+
     /// Convert to the standard `ToolDef` used by the API, using the rich
     /// description generated from the structured fields.
     pub fn to_tool_def(&self) -> ToolDef {
@@ -263,6 +310,59 @@ mod tests {
                 .contains("A tool built via the shortcut")
         );
         assert!(def.function.description.contains("When NOT to use:"));
+    }
+
+    #[test]
+    fn compact_description_is_purpose_only() {
+        let spec = ToolSpec::builder("test")
+            .purpose("Search file contents by regex pattern")
+            .when_to_use("When searching")
+            .when_not_to_use("When you know the file")
+            .parameters(serde_json::json!({"type": "object", "properties": {}}))
+            .build();
+
+        let compact = spec.to_compact_description();
+        assert_eq!(compact, "Search file contents by regex pattern.");
+        assert!(!compact.contains("When to use"));
+    }
+
+    #[test]
+    fn extended_description_excludes_purpose() {
+        let spec = ToolSpec::builder("test")
+            .purpose("Search file contents")
+            .when_to_use("When searching across files")
+            .when_not_to_use("When you know the file path")
+            .parameters(serde_json::json!({"type": "object", "properties": {}}))
+            .example("grep(pattern=\"TODO\")", "Returns matching lines")
+            .build();
+
+        let extended = spec.to_extended_description();
+        assert!(!extended.contains("Search file contents."));
+        assert!(extended.contains("When to use: When searching across files"));
+        assert!(extended.contains("When NOT to use: When you know the file path"));
+        assert!(extended.contains("Examples:"));
+    }
+
+    #[test]
+    fn compact_tool_def_uses_compact_description() {
+        let spec = ToolSpec::builder("grep")
+            .purpose("Search file contents by regex pattern")
+            .when_to_use("When searching")
+            .when_not_to_use("When you know the file")
+            .parameters(serde_json::json!({"type": "object", "properties": {}}))
+            .build();
+
+        let compact_def = spec.to_compact_tool_def();
+        assert_eq!(compact_def.function.name, "grep");
+        assert_eq!(
+            compact_def.function.description,
+            "Search file contents by regex pattern."
+        );
+        assert!(!compact_def.function.description.contains("When to use"));
+
+        // Full def should have more content.
+        let full_def = spec.to_tool_def();
+        assert!(full_def.function.description.len() > compact_def.function.description.len());
     }
 
     #[test]
