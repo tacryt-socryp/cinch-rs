@@ -10,7 +10,7 @@ use cinch_rs::agent::config::HarnessConfig;
 use cinch_rs::tools::core::ToolSet;
 
 use crate::prompt::coding_system_prompt;
-use crate::tools::{GIT_COMMIT, GitToolsExt};
+use crate::tools::{GIT_CHECKOUT, GIT_COMMIT, GitToolsExt};
 
 /// Configuration for a coding agent session.
 ///
@@ -66,7 +66,10 @@ impl CodeConfig {
             .with_streaming(self.streaming)
             .with_project_root(&self.workdir)
             .with_memory_file(memory_file)
-            .with_approval_required_tools(vec![GIT_COMMIT.to_string()]);
+            .with_approval_required_tools(vec![
+                GIT_COMMIT.to_string(),
+                GIT_CHECKOUT.to_string(),
+            ]);
 
         config.session.sessions_dir = sessions_dir;
 
@@ -140,10 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn build_harness_config_gates_git_commit() {
+    fn build_harness_config_gates_mutation_tools() {
         let config = CodeConfig::default();
         let harness = config.build_harness_config();
         assert!(harness.approval_required_tools.contains(&"git_commit".to_string()));
+        assert!(harness.approval_required_tools.contains(&"git_checkout".to_string()));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Git tool implementations for the coding agent.
 //!
-//! Provides four git-aware tools that follow the cinch-rs
+//! Provides six git-aware tools that follow the cinch-rs
 //! [`Tool`] trait pattern:
 //!
 //! | Tool | Name | Purpose |
@@ -9,6 +9,8 @@
 //! | [`GitDiff`] | `git_diff` | Show changes between commits, index, and working tree |
 //! | [`GitLog`] | `git_log` | Show commit history |
 //! | [`GitCommit`] | `git_commit` | Stage files and create a commit |
+//! | [`GitBranch`] | `git_branch` | List, create, or delete branches |
+//! | [`GitCheckout`] | `git_checkout` | Switch branches or restore files |
 
 use cinch_rs::ToolDef;
 use cinch_rs::tools::core::{DEFAULT_MAX_RESULT_BYTES, Tool, ToolFuture, truncate_result};
@@ -354,6 +356,180 @@ impl Tool for GitCommit {
     }
 }
 
+// ── GitBranch ───────────────────────────────────────────────────────
+
+/// Arguments for `git_branch`.
+#[derive(Deserialize, JsonSchema)]
+pub struct GitBranchArgs {
+    /// Create a new branch with this name (from HEAD or `start_point`).
+    #[serde(default)]
+    pub create: Option<String>,
+    /// Starting point for the new branch (commit, tag, or branch name).
+    /// Only used when `create` is set.
+    #[serde(default)]
+    pub start_point: Option<String>,
+    /// Delete this branch.
+    #[serde(default)]
+    pub delete: Option<String>,
+}
+
+/// List, create, or delete branches (`git branch`).
+pub struct GitBranch {
+    workdir: String,
+}
+
+impl GitBranch {
+    pub fn new(workdir: impl Into<String>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
+
+impl Tool for GitBranch {
+    fn definition(&self) -> ToolDef {
+        ToolSpec::builder(super::GIT_BRANCH)
+            .purpose("List, create, or delete git branches")
+            .when_to_use(
+                "When you need to see existing branches, create a feature branch, \
+                 or delete a merged branch",
+            )
+            .when_not_to_use("When you need to switch branches — use git_checkout instead")
+            .parameters_for::<GitBranchArgs>()
+            .example("git_branch()", "[exit: 0]\n* main\n  feature-x")
+            .example(
+                "git_branch(create='feature-y')",
+                "[exit: 0]\n",
+            )
+            .example(
+                "git_branch(delete='feature-x')",
+                "[exit: 0]\nDeleted branch feature-x",
+            )
+            .build()
+            .to_tool_def()
+    }
+
+    fn execute(&self, arguments: &str) -> ToolFuture<'_> {
+        let workdir = self.workdir.clone();
+        let arguments = arguments.to_string();
+        Box::pin(async move {
+            let args: GitBranchArgs = serde_json::from_str(&arguments)
+                .unwrap_or(GitBranchArgs { create: None, start_point: None, delete: None });
+
+            if let Some(ref name) = args.create {
+                if name.is_empty() {
+                    return "Error: branch name must not be empty".to_string();
+                }
+                let mut cmd_args = vec!["branch", name.as_str()];
+                let sp;
+                if let Some(ref start) = args.start_point {
+                    sp = start.clone();
+                    cmd_args.push(&sp);
+                }
+                return truncate_result(
+                    run_git(&workdir, &cmd_args).await,
+                    DEFAULT_MAX_RESULT_BYTES,
+                );
+            }
+
+            if let Some(ref name) = args.delete {
+                if name.is_empty() {
+                    return "Error: branch name must not be empty".to_string();
+                }
+                // Use -d (safe delete) — refuses to delete unmerged branches.
+                return truncate_result(
+                    run_git(&workdir, &["branch", "-d", name]).await,
+                    DEFAULT_MAX_RESULT_BYTES,
+                );
+            }
+
+            // Default: list branches.
+            truncate_result(
+                run_git(&workdir, &["branch", "--list", "-v"]).await,
+                DEFAULT_MAX_RESULT_BYTES,
+            )
+        })
+    }
+}
+
+// ── GitCheckout ─────────────────────────────────────────────────────
+
+/// Arguments for `git_checkout`.
+#[derive(Deserialize, JsonSchema)]
+pub struct GitCheckoutArgs {
+    /// Branch name or commit to switch to.
+    pub target: String,
+    /// Create a new branch and switch to it (like `git checkout -b`).
+    #[serde(default)]
+    pub create: Option<bool>,
+}
+
+/// Switch branches or restore files (`git checkout` / `git switch`).
+pub struct GitCheckout {
+    workdir: String,
+}
+
+impl GitCheckout {
+    pub fn new(workdir: impl Into<String>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
+
+impl Tool for GitCheckout {
+    fn definition(&self) -> ToolDef {
+        ToolSpec::builder(super::GIT_CHECKOUT)
+            .purpose("Switch to a different branch or create and switch to a new branch")
+            .when_to_use(
+                "When you need to switch to an existing branch or create a new feature branch \
+                 and switch to it. Use create=true to create the branch if it doesn't exist",
+            )
+            .when_not_to_use(
+                "Do not switch branches without the user's permission. This modifies the \
+                 working tree and could discard uncommitted changes",
+            )
+            .parameters_for::<GitCheckoutArgs>()
+            .example(
+                "git_checkout(target='feature-x')",
+                "[exit: 0]\nSwitched to branch 'feature-x'",
+            )
+            .example(
+                "git_checkout(target='feature-y', create=true)",
+                "[exit: 0]\nSwitched to a new branch 'feature-y'",
+            )
+            .build()
+            .to_tool_def()
+    }
+
+    fn is_mutation(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, arguments: &str) -> ToolFuture<'_> {
+        let workdir = self.workdir.clone();
+        let arguments = arguments.to_string();
+        Box::pin(async move {
+            let args: GitCheckoutArgs = match serde_json::from_str(&arguments) {
+                Ok(a) => a,
+                Err(_) => return "Error: 'target' argument is required".to_string(),
+            };
+
+            if args.target.is_empty() {
+                return "Error: target must not be empty".to_string();
+            }
+
+            let mut cmd_args = vec!["checkout"];
+            if args.create.unwrap_or(false) {
+                cmd_args.push("-b");
+            }
+            cmd_args.push(&args.target);
+
+            truncate_result(run_git(&workdir, &cmd_args).await, DEFAULT_MAX_RESULT_BYTES)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +590,52 @@ mod tests {
         let result = tool
             .execute(r#"{"message":"test","paths":["../../etc/passwd"]}"#)
             .await;
+        assert!(result.contains("Error"));
+    }
+
+    #[test]
+    fn git_branch_definition() {
+        let tool = GitBranch::new("/tmp");
+        let def = tool.definition();
+        assert_eq!(def.function.name, "git_branch");
+        assert!(!tool.cacheable());
+        assert!(!tool.is_mutation());
+    }
+
+    #[tokio::test]
+    async fn git_branch_create_rejects_empty_name() {
+        let tool = GitBranch::new("/tmp");
+        let result = tool.execute(r#"{"create":""}"#).await;
+        assert!(result.contains("Error"));
+    }
+
+    #[tokio::test]
+    async fn git_branch_delete_rejects_empty_name() {
+        let tool = GitBranch::new("/tmp");
+        let result = tool.execute(r#"{"delete":""}"#).await;
+        assert!(result.contains("Error"));
+    }
+
+    #[test]
+    fn git_checkout_definition() {
+        let tool = GitCheckout::new("/tmp");
+        let def = tool.definition();
+        assert_eq!(def.function.name, "git_checkout");
+        assert!(!tool.cacheable());
+        assert!(tool.is_mutation());
+    }
+
+    #[tokio::test]
+    async fn git_checkout_rejects_empty_target() {
+        let tool = GitCheckout::new("/tmp");
+        let result = tool.execute(r#"{"target":""}"#).await;
+        assert!(result.contains("Error"));
+    }
+
+    #[tokio::test]
+    async fn git_checkout_rejects_missing_target() {
+        let tool = GitCheckout::new("/tmp");
+        let result = tool.execute(r#"{}"#).await;
         assert!(result.contains("Error"));
     }
 }

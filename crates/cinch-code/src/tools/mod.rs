@@ -5,7 +5,7 @@
 
 pub mod git;
 
-pub use git::{GitCommit, GitDiff, GitLog, GitStatus};
+pub use git::{GitBranch, GitCheckout, GitCommit, GitDiff, GitLog, GitStatus};
 
 // ── Tool name constants ─────────────────────────────────────────────
 
@@ -13,6 +13,8 @@ pub const GIT_STATUS: &str = "git_status";
 pub const GIT_DIFF: &str = "git_diff";
 pub const GIT_LOG: &str = "git_log";
 pub const GIT_COMMIT: &str = "git_commit";
+pub const GIT_BRANCH: &str = "git_branch";
+pub const GIT_CHECKOUT: &str = "git_checkout";
 
 // ── Extension trait ─────────────────────────────────────────────────
 
@@ -39,6 +41,8 @@ impl GitToolsExt for cinch_rs::tools::core::ToolSet {
         self.with(GitStatus::new(wd.clone()))
             .with(GitDiff::new(wd.clone()))
             .with(GitLog::new(wd.clone()))
-            .with(GitCommit::new(wd))
+            .with(GitCommit::new(wd.clone()))
+            .with(GitBranch::new(wd.clone()))
+            .with(GitCheckout::new(wd))
     }
 }
