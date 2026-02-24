@@ -142,7 +142,7 @@ impl ToolFilter {
     /// [`ToolSet::with_common_tools`](crate::tools::core::ToolSet::with_common_tools).
     ///
     /// Adds three categories (`file_ops`, `search`, `shell`) and marks
-    /// `think`, `todo`, `read_file`, `list_files`, and `shell` as
+    /// `think`, `todo`, `read_file`, `list_dir`, and `shell` as
     /// always-included. Domain-specific categories can be chained after
     /// this call.
     ///
@@ -154,10 +154,10 @@ impl ToolFilter {
     ///     .with_category(ToolCategory::new("twitter", &["post_tweet"], "When posting"));
     /// ```
     pub fn with_common_categories(self) -> Self {
-        self.with_always_include_all(&["think", "todo", "read_file", "list_files", "shell"])
+        self.with_always_include_all(&["think", "todo", "read_file", "list_dir", "shell"])
             .with_category(ToolCategory::new(
                 "file_ops",
-                &["read_file", "list_files", "find_files"],
+                &["read_file", "list_dir", "find_files"],
                 "When reading or browsing files",
             ))
             .with_category(ToolCategory::new(
@@ -192,7 +192,7 @@ mod tests {
         filter.always_include("think");
         filter.add_category(ToolCategory {
             name: "file_ops".into(),
-            tools: vec!["read_file".into(), "list_files".into()],
+            tools: vec!["read_file".into(), "list_dir".into()],
             when_relevant: "When reading or browsing files".into(),
         });
         filter.add_category(ToolCategory {
@@ -204,7 +204,7 @@ mod tests {
         let all_tools = vec![
             make_tool_def("think"),
             make_tool_def("read_file"),
-            make_tool_def("list_files"),
+            make_tool_def("list_dir"),
             make_tool_def("grep"),
             make_tool_def("find_files"),
             make_tool_def("shell"),
@@ -250,7 +250,7 @@ mod tests {
             make_tool_def("grep"),
             make_tool_def("read_file"),
             make_tool_def("shell"),
-            make_tool_def("list_files"),
+            make_tool_def("list_dir"),
         ];
 
         // No matching keywords → falls back to most-used.
@@ -264,11 +264,11 @@ mod tests {
     fn tool_category_new_convenience() {
         let cat = ToolCategory::new(
             "file_ops",
-            &["read_file", "list_files"],
+            &["read_file", "list_dir"],
             "When reading files",
         );
         assert_eq!(cat.name, "file_ops");
-        assert_eq!(cat.tools, vec!["read_file", "list_files"]);
+        assert_eq!(cat.tools, vec!["read_file", "list_dir"]);
         assert_eq!(cat.when_relevant, "When reading files");
     }
 
@@ -325,7 +325,7 @@ mod tests {
             make_tool_def("think"),
             make_tool_def("todo"),
             make_tool_def("read_file"),
-            make_tool_def("list_files"),
+            make_tool_def("list_dir"),
             make_tool_def("find_files"),
             make_tool_def("grep"),
             make_tool_def("shell"),
@@ -342,8 +342,8 @@ mod tests {
             "read_file should be included (always + file_ops)"
         );
         assert!(
-            names.contains(&"list_files"),
-            "list_files should be included (always + file_ops)"
+            names.contains(&"list_dir"),
+            "list_dir should be included (always + file_ops)"
         );
         assert!(
             names.contains(&"find_files"),

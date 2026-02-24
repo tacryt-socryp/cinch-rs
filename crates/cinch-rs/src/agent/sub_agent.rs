@@ -266,7 +266,7 @@ fn default_max_result_chars() -> usize {
 fn explore_system_prompt(name: &str) -> String {
     format!(
         "You are a focused exploration agent named '{name}'. Search the codebase to \
-         answer the question. Use read-only tools (read_file, grep, list_files, \
+         answer the question. Use read-only tools (read_file, grep, list_dir, \
          find_files). Be thorough but concise in your findings. Do not ask clarifying \
          questions — do your best with the information given."
     )

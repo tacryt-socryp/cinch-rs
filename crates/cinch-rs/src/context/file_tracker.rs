@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 /// Tracks recently-accessed files for preservation through compaction.
 ///
 /// File accesses are recorded from tool call arguments (e.g. `read_file`,
-/// `grep`, `list_files`, `find_files`). When compaction runs, the tracker
+/// `grep`, `list_dir`, `find_files`). When compaction runs, the tracker
 /// builds a human-readable note listing the most recently accessed files
 /// so the summarizer can include them in its output.
 pub struct FileAccessTracker {
@@ -57,7 +57,7 @@ impl FileAccessTracker {
     /// Parses JSON arguments to extract file paths. Recognized tools:
     /// - `read_file` → [`FileAccessType::Read`]
     /// - `write_file`, `edit_file` → [`FileAccessType::Write`]
-    /// - `list_files`, `grep`, `find_files` → [`FileAccessType::Search`]
+    /// - `list_dir`, `grep`, `find_files` → [`FileAccessType::Search`]
     ///
     /// Deduplicates by path: if the file was already tracked, its entry is
     /// moved to the end with the updated round and access type.
@@ -65,7 +65,7 @@ impl FileAccessTracker {
         let access_type = match tool_name {
             "read_file" => FileAccessType::Read,
             "write_file" | "edit_file" => FileAccessType::Write,
-            "list_files" | "grep" | "find_files" => FileAccessType::Search,
+            "list_dir" | "grep" | "find_files" => FileAccessType::Search,
             _ => return,
         };
 
@@ -160,7 +160,7 @@ mod tests {
     fn record_search_tools() {
         let mut tracker = FileAccessTracker::new(5);
         tracker.record_tool_access("grep", r#"{"pattern":"TODO"}"#, 1);
-        tracker.record_tool_access("list_files", r#"{"path":"src/"}"#, 2);
+        tracker.record_tool_access("list_dir", r#"{"path":"src/"}"#, 2);
         tracker.record_tool_access("find_files", r#"{"path":"tests/"}"#, 3);
 
         let note = tracker.build_preservation_note();

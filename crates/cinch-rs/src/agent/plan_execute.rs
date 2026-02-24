@@ -50,7 +50,7 @@ impl Default for PlanExecuteConfig {
                 "todo".into(),
                 // Exploration tools.
                 "read_file".into(),
-                "list_files".into(),
+                "list_dir".into(),
                 "grep".into(),
                 "find_files".into(),
                 "shell".into(),
@@ -72,7 +72,7 @@ const DEFAULT_PLANNING_PROMPT: &str = "\
 You are in the ORIENT & PLAN phase. Your goal is to understand the situation \
 before taking action.
 
-Use your exploration tools (read_file, grep, list_files, shell, etc.) to gather \
+Use your exploration tools (read_file, grep, list_dir, shell, etc.) to gather \
 the information you need. Follow threads — if something looks interesting, \
 investigate further.
 

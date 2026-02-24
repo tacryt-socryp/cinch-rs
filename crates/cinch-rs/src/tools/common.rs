@@ -12,7 +12,7 @@
 //! | [`ReadFile`] | `read_file` | Read a single file |
 //! | [`EditFile`] | `edit_file` | Edit a file by replacing an exact string |
 //! | [`WriteFile`] | `write_file` | Create or overwrite a file |
-//! | [`ListFiles`] | `list_files` | List a directory |
+//! | [`ListDir`] | `list_dir` | List a directory tree |
 //! | [`Grep`] | `grep` | Regex search in files |
 //! | [`FindFiles`] | `find_files` | Glob-based file search |
 //! | [`Shell`] | `shell` | Execute shell commands |
@@ -35,7 +35,7 @@ use tokio::fs;
 use tokio::process::Command;
 
 use crate::ToolDef;
-use crate::tools::core::{Tool, ToolFuture};
+use crate::tools::core::{Tool, ToolFuture, TruncationStrategy, truncate_with_strategy};
 use crate::tools::spec::ToolSpec;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -70,11 +70,20 @@ pub struct ReadFileArgs {
     pub limit: Option<u32>,
 }
 
-/// Typed arguments for `list_files`.
+/// Typed arguments for `list_dir`.
 #[derive(Deserialize, JsonSchema)]
-pub struct ListFilesArgs {
+pub struct ListDirArgs {
     /// Directory path relative to repo root (e.g. 'docs/').
     pub path: String,
+    /// Maximum directory depth to recurse into. Default: 2.
+    #[serde(default)]
+    pub depth: Option<u32>,
+    /// Maximum number of entries to return. Default: 50.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// 1-indexed offset for pagination. Default: 1.
+    #[serde(default)]
+    pub offset: Option<u32>,
 }
 
 /// Typed arguments for `grep`.
@@ -104,6 +113,12 @@ pub struct GrepArgs {
 pub struct FindFilesArgs {
     /// Glob pattern (e.g. 'src/**/*.rs', 'docs/*.md').
     pub pattern: String,
+    /// Directory to search in, relative to repo root. Default: repo root.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Maximum number of results to return. Default: 100, max: 1000.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Typed arguments for `shell`.
@@ -111,6 +126,12 @@ pub struct FindFilesArgs {
 pub struct ShellArgs {
     /// Shell command to execute (e.g. 'wc -l *.md', 'git log --oneline -5').
     pub command: String,
+    /// Timeout in seconds. Default: 120, max: 600.
+    #[serde(default)]
+    pub timeout: Option<u32>,
+    /// Working directory relative to repo root. Default: repo root.
+    #[serde(default)]
+    pub working_dir: Option<String>,
 }
 
 /// Typed arguments for `web_search`.
@@ -196,7 +217,7 @@ impl Tool for ReadFile {
             )
             .when_not_to_use(
                 "When searching for a pattern across many files — use grep instead. \
-                 When you need to list files in a directory — use list_files instead",
+                 When you need to list files in a directory — use list_dir instead",
             )
             .parameters_for::<ReadFileArgs>()
             .example(
@@ -243,7 +264,7 @@ impl Tool for ReadFile {
             {
                 return format!(
                     "Error: '{}' is a directory, not a file. \
-                     Use list_files to browse directories.",
+                     Use list_dir to browse directories.",
                     args.path
                 );
             }
@@ -295,17 +316,18 @@ impl Tool for ReadFile {
     }
 }
 
-// ── ListFiles ───────────────────────────────────────────────────────
+// ── ListDir ─────────────────────────────────────────────────────────
 
-/// List files in a directory under the working directory.
+/// List a directory tree under the working directory.
 ///
-/// Path traversal (`..`) is blocked. Uses `ls -ap1t` for the listing
-/// (one entry per line, directories marked with trailing `/`).
-pub struct ListFiles {
+/// Uses a native Rust recursive walk (no shell dependency) with
+/// configurable depth, limit, and offset for pagination. Path traversal
+/// (`..`) is blocked.
+pub struct ListDir {
     workdir: String,
 }
 
-impl ListFiles {
+impl ListDir {
     pub fn new(workdir: impl Into<String>) -> Self {
         Self {
             workdir: workdir.into(),
@@ -313,10 +335,16 @@ impl ListFiles {
     }
 }
 
-impl Tool for ListFiles {
+/// Default maximum depth for `list_dir`.
+const DEFAULT_LIST_DIR_DEPTH: u32 = 2;
+
+/// Default entry limit for `list_dir`.
+const DEFAULT_LIST_DIR_LIMIT: u32 = 50;
+
+impl Tool for ListDir {
     fn definition(&self) -> ToolDef {
-        ToolSpec::builder("list_files")
-            .purpose("List files in a directory")
+        ToolSpec::builder("list_dir")
+            .purpose("List directory contents as an indented tree")
             .when_to_use(
                 "When you need to discover what files exist in a specific directory",
             )
@@ -324,16 +352,19 @@ impl Tool for ListFiles {
                 "When searching for files by glob pattern across nested directories — \
                  use find_files instead. When you already know the file path — use read_file",
             )
-            .parameters_for::<ListFilesArgs>()
+            .parameters_for::<ListDirArgs>()
             .example(
-                "list_files(path='docs/')",
-                "Returns one entry per line, sorted newest first. Directories have a trailing '/'",
+                "list_dir(path='src/')",
+                "Absolute path: /project/src\ntools/\n  common.rs\n  core.rs\nREADME.md",
             )
-            .output_format("One entry per line, newest first. Directories end with '/'.")
+            .output_format(
+                "Indented tree rooted at the target directory. Directories end with '/', \
+                 symlinks end with '@'. Use limit/offset for pagination.",
+            )
             .disambiguate(
                 "Need to find files matching a glob pattern recursively",
                 "find_files",
-                "find_files supports glob patterns across nested directories; list_files shows a single directory",
+                "find_files supports glob patterns across nested directories; list_dir shows a directory tree",
             )
             .build()
             .to_tool_def()
@@ -347,7 +378,7 @@ impl Tool for ListFiles {
         let workdir = self.workdir.clone();
         let arguments = arguments.to_string();
         Box::pin(async move {
-            let args: ListFilesArgs = match serde_json::from_str(&arguments) {
+            let args: ListDirArgs = match serde_json::from_str(&arguments) {
                 Ok(a) => a,
                 Err(_) => return "Error: 'path' argument is required".to_string(),
             };
@@ -355,12 +386,87 @@ impl Tool for ListFiles {
                 return "Error: path traversal not allowed".to_string();
             }
             let full_path = Path::new(&workdir).join(&args.path);
-            // -a: include hidden files, -p: append '/' to dirs, -1: one per
-            // line, -t: sort newest first so the most recent entries appear
-            // before any output truncation.
-            run_command("ls", &["-ap1t", &full_path.to_string_lossy()], &[]).await
+
+            let depth = args.depth.unwrap_or(DEFAULT_LIST_DIR_DEPTH) as usize;
+            let limit = args.limit.unwrap_or(DEFAULT_LIST_DIR_LIMIT) as usize;
+            let offset = args.offset.unwrap_or(1).max(1) as usize - 1; // convert to 0-indexed
+
+            // Resolve to absolute path for the header.
+            let abs_path = match tokio::fs::canonicalize(&full_path).await {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(e) => return format!("Error: {e}"),
+            };
+
+            // Collect all entries with recursive walk.
+            let mut entries: Vec<String> = Vec::new();
+            if let Err(e) = collect_dir_entries(&full_path, depth, 0, &mut entries).await {
+                return format!("Error: {e}");
+            }
+
+            let total = entries.len();
+            let page: Vec<&str> = entries.iter().skip(offset).take(limit).map(|s| s.as_str()).collect();
+
+            let mut out = format!("Absolute path: {abs_path}\n");
+            for entry in &page {
+                out.push_str(entry);
+                out.push('\n');
+            }
+
+            if offset + limit < total {
+                out.push_str(&format!(
+                    "More than {} entries found ({total} total). Use offset/limit for more.",
+                    offset + limit,
+                ));
+            }
+
+            out
         })
     }
+}
+
+/// Recursively collect directory entries into an indented list.
+///
+/// Directories are suffixed with `/`, symlinks with `@`. Entries at each
+/// level are sorted alphabetically.
+async fn collect_dir_entries(
+    dir: &std::path::Path,
+    max_depth: usize,
+    current_depth: usize,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut rd = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|e| format!("cannot read directory: {e}"))?;
+
+    // Collect entries so we can sort them.
+    let mut children: Vec<(String, std::fs::FileType)> = Vec::new();
+    while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Ok(ft) = entry.file_type().await {
+            children.push((name, ft));
+        }
+    }
+    children.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let indent = "  ".repeat(current_depth);
+    for (name, ft) in &children {
+        let suffix = if ft.is_dir() {
+            "/"
+        } else if ft.is_symlink() {
+            "@"
+        } else {
+            ""
+        };
+        out.push(format!("{indent}{name}{suffix}"));
+
+        // Recurse into subdirectories if within depth.
+        if ft.is_dir() && current_depth < max_depth {
+            let child_path = dir.join(name);
+            // Best-effort: skip directories we can't read.
+            let _ = Box::pin(collect_dir_entries(&child_path, max_depth, current_depth + 1, out)).await;
+        }
+    }
+    Ok(())
 }
 
 // ── Grep ────────────────────────────────────────────────────────────
@@ -554,24 +660,33 @@ impl FindFiles {
 impl Tool for FindFiles {
     fn definition(&self) -> ToolDef {
         ToolSpec::builder("find_files")
-            .purpose("Find files matching a glob pattern")
+            .purpose("Find files matching a glob pattern, sorted by modification time (newest first)")
             .when_to_use(
-                "When you need to discover files by name or extension across nested directories",
+                "When you need to discover files by name or extension across nested directories. \
+                 Results are sorted by modification time (newest first) so the most recently \
+                 changed files appear first",
             )
             .when_not_to_use(
-                "When listing files in a single known directory — use list_files instead. \
+                "When listing files in a single known directory — use list_dir instead. \
                  When searching file content — use grep instead",
             )
             .parameters_for::<FindFilesArgs>()
             .example(
                 "find_files(pattern='docs/**/*.md')",
-                "Returns a sorted list of matching file paths",
+                "Returns matching file paths sorted by modification time (newest first)",
             )
-            .output_format("Newline-separated list of file paths relative to repo root")
+            .example(
+                "find_files(pattern='*.rs', path='src/tools', limit=10)",
+                "Returns the 10 most recently modified .rs files under src/tools",
+            )
+            .output_format(
+                "Newline-separated list of file paths relative to repo root, \
+                 sorted by modification time (newest first)",
+            )
             .disambiguate(
                 "Need to see files in one directory",
-                "list_files",
-                "list_files shows one directory with details; find_files searches recursively by pattern",
+                "list_dir",
+                "list_dir shows a directory tree; find_files searches recursively by pattern",
             )
             .build()
             .to_tool_def()
@@ -583,7 +698,7 @@ impl Tool for FindFiles {
 
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
         let workdir = self.workdir.clone();
-        let max_results = self.max_results;
+        let default_max_results = self.max_results;
         let max_result_bytes = self.max_result_bytes;
         let arguments = arguments.to_string();
         Box::pin(async move {
@@ -594,18 +709,47 @@ impl Tool for FindFiles {
             if args.pattern.contains("..") {
                 return "Error: path traversal not allowed".to_string();
             }
+            if let Some(ref p) = args.path
+                && p.contains("..")
+            {
+                return "Error: path traversal not allowed".to_string();
+            }
+
+            let limit = args.limit.unwrap_or(default_max_results).min(1000);
+            let search_path = args.path.as_deref().unwrap_or(".");
             let pattern = &args.pattern;
+
+            // Build the -path argument. When searching from a subdirectory,
+            // the path prefix in find changes from "./" to "{search_path}/".
+            let find_pattern = if search_path == "." {
+                format!("./{pattern}")
+            } else {
+                format!("{search_path}/{pattern}")
+            };
+
+            // Use find + xargs ls -1t for mtime-sorted results.
+            // Cap intermediate results at 1000 for the sort step.
             let result = run_shell(
                 &workdir,
                 &format!(
-                    "find . -path './{pattern}' -type f 2>/dev/null | head -{max_results} | sort"
+                    "find {search_path} -path '{find_pattern}' -type f 2>/dev/null \
+                     | head -1000 \
+                     | xargs ls -1t 2>/dev/null \
+                     | head -{limit}"
                 ),
             )
             .await;
-            if result.trim().is_empty() {
+
+            // Strip the [exit: N] prefix from the inner shell call for clean output.
+            let clean = result
+                .strip_prefix("[exit: 0]\n")
+                .or_else(|| result.strip_prefix("[exit: 1]\n"))
+                .unwrap_or(&result);
+
+            if clean.trim().is_empty() {
                 format!("No files found matching '{pattern}'")
             } else {
-                truncate_result(result, max_result_bytes)
+                truncate_result(clean.to_string(), max_result_bytes)
             }
         })
     }
@@ -659,7 +803,7 @@ impl Tool for Shell {
             .when_to_use(
                 "When you need an operation not covered by other tools: git commands, \
                  word counts, date calculations, file manipulation, data processing, etc. \
-                 Commands run in the repo root directory",
+                 Commands run in the repo root directory by default",
             )
             .when_not_to_use(
                 "When a dedicated tool exists for the task — use read_file to read files, \
@@ -669,9 +813,12 @@ impl Tool for Shell {
             .parameters_for::<ShellArgs>()
             .example(
                 "shell(command='git log --oneline -5')",
-                "Returns the last 5 git commits as one-line summaries",
+                "[exit: 0]\na1b2c3d First commit\n...",
             )
-            .output_format("Command stdout (and stderr if non-empty)")
+            .output_format(
+                "Prefixed with [exit: N]. Stdout follows; stderr appended on failure. \
+                 Long output is truncated with head+tail preserved.",
+            )
             .build()
             .to_tool_def()
     }
@@ -694,8 +841,39 @@ impl Tool for Shell {
             if blocked.iter().any(|pat| lower.contains(pat)) {
                 return "Error: potentially destructive command blocked".to_string();
             }
-            let result = run_shell(&workdir, &args.command).await;
-            truncate_result(result, max)
+
+            // Resolve working directory.
+            let effective_workdir = if let Some(ref wd) = args.working_dir {
+                if wd.contains("..") {
+                    return "Error: path traversal not allowed in working_dir".to_string();
+                }
+                let p = std::path::Path::new(&workdir).join(wd);
+                p.to_string_lossy().to_string()
+            } else {
+                workdir.clone()
+            };
+
+            // Timeout: default 120s, cap at 600s.
+            let timeout_secs = args.timeout.unwrap_or(120).min(600);
+            let timeout_dur = std::time::Duration::from_secs(timeout_secs as u64);
+
+            let result = match tokio::time::timeout(
+                timeout_dur,
+                run_shell(&effective_workdir, &args.command),
+            )
+            .await
+            {
+                Ok(output) => output,
+                Err(_) => {
+                    return format!("Error: command timed out after {timeout_secs} seconds");
+                }
+            };
+
+            truncate_with_strategy(
+                result,
+                max,
+                &TruncationStrategy::HeadAndTail { tail_ratio: 0.4 },
+            )
         })
     }
 }
@@ -1111,22 +1289,24 @@ pub fn parse_args(arguments: &str) -> serde_json::Value {
 }
 
 /// Format command output into a result string.
+///
+/// Output is prefixed with `[exit: N]` for consistent machine-readable
+/// parsing. On success, only stdout is included. On failure (or when
+/// stderr is non-empty), both streams are included.
 fn format_output(output: std::process::Output, lenient_exit_codes: &[i32]) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(-1);
     let ok = output.status.success()
-        || output
-            .status
-            .code()
-            .is_some_and(|c| lenient_exit_codes.contains(&c));
+        || lenient_exit_codes.contains(&code);
     if ok {
         if stderr.is_empty() {
-            stdout
+            format!("[exit: {code}]\n{stdout}")
         } else {
-            format!("{stdout}\n[stderr]\n{stderr}")
+            format!("[exit: {code}]\n{stdout}\n[stderr]\n{stderr}")
         }
     } else {
-        format!("Command failed ({}):\n{stdout}\n{stderr}", output.status)
+        format!("[exit: {code}]\n{stdout}\n{stderr}")
     }
 }
 
@@ -1172,10 +1352,10 @@ mod tests {
     }
 
     #[test]
-    fn list_files_definition_has_tool_spec_fields() {
-        let tool = ListFiles::new("/tmp");
+    fn list_dir_definition_has_tool_spec_fields() {
+        let tool = ListDir::new("/tmp");
         let def = tool.definition();
-        assert_eq!(def.function.name, "list_files");
+        assert_eq!(def.function.name, "list_dir");
         assert!(def.function.description.contains("When NOT to use:"));
     }
 
@@ -1221,7 +1401,7 @@ mod tests {
     fn all_common_tools_register_in_toolset() {
         let set = ToolSet::new()
             .with(ReadFile::new("/tmp"))
-            .with(ListFiles::new("/tmp"))
+            .with(ListDir::new("/tmp"))
             .with(Grep::new("/tmp"))
             .with(FindFiles::new("/tmp"))
             .with(Shell::new("/tmp"));
@@ -1243,8 +1423,8 @@ mod tests {
             "expected directory hint, got: {result}"
         );
         assert!(
-            result.contains("list_files"),
-            "expected list_files suggestion, got: {result}"
+            result.contains("list_dir"),
+            "expected list_dir suggestion, got: {result}"
         );
     }
 
@@ -1258,10 +1438,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_files_blocks_path_traversal() {
-        let tool = ListFiles::new("/tmp");
+    async fn list_dir_blocks_path_traversal() {
+        let tool = ListDir::new("/tmp");
         let result = tool.execute(r#"{"path": "../../secret"}"#).await;
         assert_eq!(result, "Error: path traversal not allowed");
+    }
+
+    // ── ListDir upgrade tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_dir_depth_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a");
+        std::fs::create_dir_all(sub.join("b")).unwrap();
+        std::fs::write(sub.join("b").join("deep.txt"), "").unwrap();
+        std::fs::write(sub.join("file.txt"), "").unwrap();
+
+        let tool = ListDir::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": "."}"#).await;
+        // Default depth 2: should see a/, a/file.txt, a/b/, a/b/deep.txt
+        assert!(result.contains("a/"), "expected 'a/', got:\n{result}");
+        assert!(result.contains("file.txt"), "expected file.txt, got:\n{result}");
+        assert!(result.contains("deep.txt"), "expected deep.txt at depth 2, got:\n{result}");
+    }
+
+    #[tokio::test]
+    async fn list_dir_depth_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a");
+        std::fs::create_dir_all(sub.join("b")).unwrap();
+        std::fs::write(sub.join("b").join("deep.txt"), "").unwrap();
+        std::fs::write(dir.path().join("top.txt"), "").unwrap();
+
+        let tool = ListDir::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": ".", "depth": 0}"#).await;
+        // Depth 0: should only see top-level entries, not recurse.
+        assert!(result.contains("a/"), "expected 'a/' at depth 0");
+        assert!(result.contains("top.txt"), "expected top.txt");
+        assert!(!result.contains("deep.txt"), "should not see deep.txt at depth 0");
+    }
+
+    #[tokio::test]
+    async fn list_dir_limit_and_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            std::fs::write(dir.path().join(format!("file_{i:02}.txt")), "").unwrap();
+        }
+
+        let tool = ListDir::new(dir.path().to_str().unwrap());
+        // Get entries 3-5 (offset=3, limit=3)
+        let result = tool
+            .execute(r#"{"path": ".", "depth": 0, "limit": 3, "offset": 3}"#)
+            .await;
+        assert!(result.contains("file_02"), "expected file_02 at offset 3, got:\n{result}");
+        assert!(result.contains("file_04"), "expected file_04, got:\n{result}");
+        assert!(!result.contains("file_00"), "file_00 should be before offset");
+        assert!(result.contains("More than"), "should indicate more entries available");
+    }
+
+    #[tokio::test]
+    async fn list_dir_dirs_marked_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("file.txt"), "").unwrap();
+
+        let tool = ListDir::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": ".", "depth": 0}"#).await;
+        assert!(result.contains("subdir/"), "directories should have trailing /");
+        assert!(
+            result.contains("file.txt") && !result.contains("file.txt/"),
+            "files should not have trailing /"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_dir_absolute_path_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = ListDir::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"path": "."}"#).await;
+        assert!(
+            result.starts_with("Absolute path:"),
+            "expected Absolute path: header, got: {result}"
+        );
     }
 
     #[tokio::test]
@@ -1278,6 +1536,68 @@ mod tests {
         let tool = FindFiles::new("/tmp");
         let result = tool.execute(r#"{"pattern": "../../*.txt"}"#).await;
         assert_eq!(result, "Error: path traversal not allowed");
+    }
+
+    // ── FindFiles upgrade tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn find_files_mtime_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create files with a slight delay so mtimes differ.
+        std::fs::write(dir.path().join("old.txt"), "old").unwrap();
+        // Touch to ensure different mtime.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+
+        let tool = FindFiles::new(dir.path().to_str().unwrap());
+        let result = tool.execute(r#"{"pattern": "*.txt"}"#).await;
+        let new_pos = result.find("new.txt");
+        let old_pos = result.find("old.txt");
+        assert!(
+            new_pos.is_some() && old_pos.is_some(),
+            "both files should appear, got:\n{result}"
+        );
+        assert!(
+            new_pos.unwrap() < old_pos.unwrap(),
+            "new.txt should appear before old.txt (mtime order), got:\n{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_files_respects_limit_param() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "").unwrap();
+        }
+
+        let tool = FindFiles::new(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(r#"{"pattern": "*.txt", "limit": 2}"#)
+            .await;
+        let lines: Vec<&str> = result.lines().filter(|l| l.ends_with(".txt")).collect();
+        assert_eq!(lines.len(), 2, "expected exactly 2 results, got:\n{result}");
+    }
+
+    #[tokio::test]
+    async fn find_files_respects_path_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("inside.txt"), "").unwrap();
+        std::fs::write(dir.path().join("outside.txt"), "").unwrap();
+
+        let tool = FindFiles::new(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(r#"{"pattern": "*.txt", "path": "sub"}"#)
+            .await;
+        assert!(
+            result.contains("inside.txt"),
+            "should find inside.txt, got:\n{result}"
+        );
+        assert!(
+            !result.contains("outside.txt"),
+            "should not find outside.txt, got:\n{result}"
+        );
     }
 
     // ── Shell blocking tests ────────────────────────────────────
@@ -1303,6 +1623,57 @@ mod tests {
             .execute(r#"{"command": "echo DROP TABLE users"}"#)
             .await;
         assert_eq!(result, "Error: potentially destructive command blocked");
+    }
+
+    // ── Shell upgrade tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn shell_output_has_exit_code_prefix() {
+        let tool = Shell::new("/tmp");
+        let result = tool.execute(r#"{"command": "echo hello"}"#).await;
+        assert!(
+            result.starts_with("[exit: 0]"),
+            "expected [exit: 0] prefix, got: {result}"
+        );
+        assert!(result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn shell_failed_command_has_exit_code() {
+        let tool = Shell::new("/tmp");
+        let result = tool.execute(r#"{"command": "false"}"#).await;
+        assert!(
+            result.starts_with("[exit: 1]"),
+            "expected [exit: 1] prefix, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_timeout_enforced() {
+        let tool = Shell::new("/tmp");
+        let result = tool
+            .execute(r#"{"command": "sleep 10", "timeout": 1}"#)
+            .await;
+        assert!(
+            result.contains("timed out after 1 seconds"),
+            "expected timeout error, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_working_dir_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("mydir");
+        std::fs::create_dir(&sub).unwrap();
+
+        let tool = Shell::new(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(r#"{"command": "pwd", "working_dir": "mydir"}"#)
+            .await;
+        assert!(
+            result.contains("mydir"),
+            "expected 'mydir' in output, got: {result}"
+        );
     }
 
     // ── Missing argument tests ──────────────────────────────────

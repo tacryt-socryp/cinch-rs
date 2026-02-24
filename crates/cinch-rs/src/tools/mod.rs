@@ -19,7 +19,7 @@
 //! - [`core`] — [`Tool`] trait, [`ToolSet`], [`FnTool`], [`DisabledTool`],
 //!   pseudo-tools ([`ThinkTool`], [`TodoTool`]).
 //! - [`common`] — built-in tools: `ReadFile`, `EditFile`, `WriteFile`,
-//!   `ListFiles`, `Grep`, `FindFiles`, `Shell`. Register all at once with
+//!   `ListDir`, `Grep`, `FindFiles`, `Shell`. Register all at once with
 //!   [`ToolSet::with_common_tools()`].
 //! - [`read_tracker`] — [`ReadTracker`] for read-before-write enforcement
 //!   shared between `ReadFile`, `EditFile`, and `WriteFile`.
@@ -47,7 +47,8 @@ pub use core::{
     CommonToolsConfig, DisabledTool, FnTool, ThinkTool, TodoTool, Tool, ToolFuture, ToolSet,
 };
 pub use core::{
-    DEFAULT_MAX_RESULT_BYTES, parse_tool_args, truncate_result, validate_tool_arguments,
+    DEFAULT_MAX_RESULT_BYTES, TruncationStrategy, parse_tool_args, truncate_result,
+    truncate_with_strategy, validate_tool_arguments,
 };
 pub use filter::{ToolCategory, ToolFilter};
 pub use read_tracker::ReadTracker;

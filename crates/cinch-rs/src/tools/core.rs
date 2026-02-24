@@ -319,7 +319,7 @@ impl ToolSet {
         self.tools.is_empty()
     }
 
-    /// Register all common tools ([`ReadFile`], [`ListFiles`], [`Grep`],
+    /// Register all common tools ([`ReadFile`], [`ListDir`], [`Grep`],
     /// [`FindFiles`], [`Shell`], [`WebSearch`]) plus the [`ThinkTool`] and
     /// [`TodoTool`] pseudo-tools. Common tools inherit the `ToolSet`'s
     /// `max_result_bytes`.
@@ -328,7 +328,7 @@ impl ToolSet {
     /// Use individual `.with()` calls if you need per-tool configuration.
     ///
     /// [`ReadFile`]: crate::tools::common::ReadFile
-    /// [`ListFiles`]: crate::tools::common::ListFiles
+    /// [`ListDir`]: crate::tools::common::ListDir
     /// [`Grep`]: crate::tools::common::Grep
     /// [`FindFiles`]: crate::tools::common::FindFiles
     /// [`Shell`]: crate::tools::common::Shell
@@ -359,7 +359,7 @@ impl ToolSet {
         config: CommonToolsConfig,
     ) -> Self {
         use crate::tools::common::{
-            EditFile, FindFiles, Grep, ListFiles, ReadFile, Shell, WebSearch, WriteFile,
+            EditFile, FindFiles, Grep, ListDir, ReadFile, Shell, WebSearch, WriteFile,
         };
         use crate::tools::read_tracker::ReadTracker;
         use std::sync::Arc;
@@ -376,7 +376,7 @@ impl ToolSet {
                 .max_result_bytes(max)
                 .with_tracker(tracker.clone()),
         )
-        .with(ListFiles::new(workdir.clone()))
+        .with(ListDir::new(workdir.clone()))
         .with(
             Grep::new(workdir.clone())
                 .max_matches(config.grep_max_matches)
@@ -724,12 +724,103 @@ pub fn log_tool_call(name: &str, arguments: &str) {
 }
 
 /// Truncate a string to at most `max` bytes, appending a notice if trimmed.
+///
+/// This is a convenience wrapper for [`TruncationStrategy::Head`]. For
+/// head-and-tail or line-based truncation, use [`truncate_with_strategy`].
 pub fn truncate_result(s: String, max: usize) -> String {
     if s.len() > max {
         format!("{}...\n[truncated: {} bytes total]", &s[..max], s.len())
     } else {
         s
     }
+}
+
+/// Strategy for truncating large tool results before returning them to the LLM.
+#[derive(Debug, Clone)]
+pub enum TruncationStrategy {
+    /// Keep the first `max` bytes, append a truncation notice.
+    /// Equivalent to [`truncate_result`].
+    Head,
+    /// Keep the first and last portions of the output.
+    /// `tail_ratio` (0.0–1.0) controls the fraction of `max` bytes reserved
+    /// for the tail. For example, 0.4 means 60% head + 40% tail.
+    HeadAndTail { tail_ratio: f32 },
+    /// Keep the first `max_lines` lines, append a notice with total line count.
+    HeadLines { max_lines: usize },
+}
+
+/// Truncate a string using the given [`TruncationStrategy`].
+///
+/// - **Head**: same as [`truncate_result`] — keeps first `max_bytes` bytes.
+/// - **HeadAndTail**: splits `max_bytes` into head and tail portions based on
+///   `tail_ratio`, inserting an omission notice in between.
+/// - **HeadLines**: keeps the first N lines regardless of byte size, appending
+///   a notice with the total line count.
+pub fn truncate_with_strategy(s: String, max_bytes: usize, strategy: &TruncationStrategy) -> String {
+    match strategy {
+        TruncationStrategy::Head => truncate_result(s, max_bytes),
+
+        TruncationStrategy::HeadAndTail { tail_ratio } => {
+            if s.len() <= max_bytes {
+                return s;
+            }
+            let ratio = tail_ratio.clamp(0.0, 1.0);
+            let tail_bytes = (max_bytes as f32 * ratio) as usize;
+            let head_bytes = max_bytes.saturating_sub(tail_bytes);
+
+            // Ensure we don't split in the middle of a multi-byte char.
+            let head_end = floor_char_boundary(&s, head_bytes);
+            let tail_start = ceil_char_boundary(&s, s.len().saturating_sub(tail_bytes));
+
+            let omitted = s.len() - head_end - (s.len() - tail_start);
+            format!(
+                "{}\n... [{} total — {} omitted] ...\n{}",
+                &s[..head_end],
+                s.len(),
+                omitted,
+                &s[tail_start..],
+            )
+        }
+
+        TruncationStrategy::HeadLines { max_lines } => {
+            let total_lines = s.lines().count();
+            if total_lines <= *max_lines {
+                return s;
+            }
+            let kept: String = s
+                .lines()
+                .take(*max_lines)
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{kept}\n[truncated: {total_lines} lines, showing first {max_lines}]"
+            )
+        }
+    }
+}
+
+/// Find the largest byte index <= `i` that is a char boundary.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut idx = i;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Find the smallest byte index >= `i` that is a char boundary.
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut idx = i;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
 }
 
 /// Parse raw JSON arguments into a typed struct.
@@ -1069,6 +1160,61 @@ mod tests {
         assert!(result.contains("[truncated: 200 bytes total]"));
     }
 
+    // ── TruncationStrategy tests ──────────────────────────────
+
+    #[test]
+    fn head_truncation_matches_existing() {
+        let s = "a".repeat(200);
+        let via_fn = truncate_result(s.clone(), 50);
+        let via_strategy =
+            truncate_with_strategy(s, 50, &TruncationStrategy::Head);
+        assert_eq!(via_fn, via_strategy);
+    }
+
+    #[test]
+    fn head_and_tail_preserves_both_ends() {
+        let s = format!("{}MIDDLE{}", "A".repeat(100), "Z".repeat(100));
+        let result = truncate_with_strategy(
+            s,
+            100,
+            &TruncationStrategy::HeadAndTail { tail_ratio: 0.4 },
+        );
+        assert!(result.starts_with(&"A".repeat(50)), "head should start with As");
+        assert!(result.ends_with(&"Z".repeat(40)), "tail should end with Zs");
+        assert!(result.contains("omitted"), "should contain omission notice");
+    }
+
+    #[test]
+    fn head_and_tail_short_string_unchanged() {
+        let s = "short string".to_string();
+        let result = truncate_with_strategy(
+            s.clone(),
+            1000,
+            &TruncationStrategy::HeadAndTail { tail_ratio: 0.4 },
+        );
+        assert_eq!(result, s);
+    }
+
+    #[test]
+    fn head_lines_truncates_at_line_count() {
+        let lines: Vec<String> = (1..=20).map(|i| format!("line {i}")).collect();
+        let s = lines.join("\n");
+        let result =
+            truncate_with_strategy(s, usize::MAX, &TruncationStrategy::HeadLines { max_lines: 5 });
+        assert!(result.starts_with("line 1\n"));
+        assert!(result.contains("line 5"));
+        assert!(!result.contains("line 6"));
+        assert!(result.contains("[truncated: 20 lines, showing first 5]"));
+    }
+
+    #[test]
+    fn head_lines_short_unchanged() {
+        let s = "line 1\nline 2\nline 3".to_string();
+        let result =
+            truncate_with_strategy(s.clone(), usize::MAX, &TruncationStrategy::HeadLines { max_lines: 10 });
+        assert_eq!(result, s);
+    }
+
     #[test]
     fn parse_helpers() {
         let args = serde_json::json!({"name": "test", "count": 42, "verbose": true});
@@ -1089,7 +1235,7 @@ mod tests {
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"edit_file".to_string()));
         assert!(names.contains(&"write_file".to_string()));
-        assert!(names.contains(&"list_files".to_string()));
+        assert!(names.contains(&"list_dir".to_string()));
         assert!(names.contains(&"grep".to_string()));
         assert!(names.contains(&"find_files".to_string()));
         assert!(names.contains(&"shell".to_string()));

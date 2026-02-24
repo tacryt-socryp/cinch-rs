@@ -42,7 +42,7 @@ fn analyze_error(tool_name: &str, error: &str) -> Vec<String> {
         || error_lower.contains("no such file")
         || error_lower.contains("does not exist")
     {
-        suggestions.push("Check that the file path is correct. Use list_files or find_files to discover the right path.".into());
+        suggestions.push("Check that the file path is correct. Use list_dir or find_files to discover the right path.".into());
         if tool_name == "read_file" {
             suggestions.push(
                 "The file may have been moved or renamed. Try searching with grep or find_files."
@@ -105,7 +105,7 @@ mod tests {
         let result = format_tool_failure("read_file", r#"{"path": "foo.rs"}"#, "File not found");
         assert!(result.contains("read_file"));
         assert!(result.contains("File not found"));
-        assert!(result.contains("list_files"));
+        assert!(result.contains("list_dir"));
     }
 
     #[test]
