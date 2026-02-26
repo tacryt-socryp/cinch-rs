@@ -12,6 +12,9 @@ publish = false
 name = "cinch-code"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 cinch-rs = { path = "../cinch-rs", version = "0.3.0" }
 cinch-tui = { path = "../cinch-tui", version = "0.3.0" }

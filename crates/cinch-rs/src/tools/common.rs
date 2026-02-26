@@ -292,9 +292,11 @@ impl Tool for ReadFile {
                         }
                         // Truncate long lines.
                         if line.len() > MAX_LINE_CHARS {
+                            let end = line.floor_char_boundary(MAX_LINE_CHARS);
+                            #[allow(clippy::string_slice)] // end from floor_char_boundary
                             output.push_str(&format!(
                                 "L{line_num}: {}... [line truncated at {MAX_LINE_CHARS} chars]\n",
-                                &line[..MAX_LINE_CHARS]
+                                &line[..end]
                             ));
                         } else {
                             output.push_str(&format!("L{line_num}: {line}\n"));
@@ -1140,6 +1142,7 @@ impl Tool for EditFile {
 
             if count > 1 && !replace_all {
                 // Report line numbers of each match.
+                #[allow(clippy::string_slice)] // byte_offset from match_indices
                 let line_nums: Vec<usize> = content
                     .match_indices(&args.old_string)
                     .map(|(byte_offset, _)| content[..byte_offset].lines().count().max(1))
@@ -1173,6 +1176,7 @@ impl Tool for EditFile {
 
             // Calculate affected line range for the first occurrence.
             let start_byte = content.find(&args.old_string).unwrap();
+            #[allow(clippy::string_slice)] // start_byte from find()
             let start_line = content[..start_byte].lines().count().max(1);
             let end_line = start_line + args.old_string.lines().count().saturating_sub(1);
 

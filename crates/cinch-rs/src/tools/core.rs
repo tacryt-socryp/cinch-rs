@@ -467,10 +467,11 @@ impl ToolSet {
             elapsed.as_secs_f64() * 1000.0,
             result.len()
         );
-        trace!(
-            "Tool {name} result preview: {}",
-            &result[..result.len().min(300)]
-        );
+        {
+            #[allow(clippy::string_slice)] // index from floor_char_boundary
+            let preview = &result[..result.floor_char_boundary(300)];
+            trace!("Tool {name} result preview: {preview}");
+        }
 
         // Wrap errors in structured reflection for better LLM self-correction.
         let result = if result.starts_with("Error:") {
@@ -736,9 +737,11 @@ pub fn log_tool_call(name: &str, arguments: &str) {
 ///
 /// This is a convenience wrapper for [`TruncationStrategy::Head`]. For
 /// head-and-tail or line-based truncation, use [`truncate_with_strategy`].
+#[allow(clippy::string_slice)] // end is from floor_char_boundary
 pub fn truncate_result(s: String, max: usize) -> String {
     if s.len() > max {
-        format!("{}...\n[truncated: {} bytes total]", &s[..max], s.len())
+        let end = s.floor_char_boundary(max);
+        format!("{}...\n[truncated: {} bytes total]", &s[..end], s.len())
     } else {
         s
     }
@@ -765,6 +768,7 @@ pub enum TruncationStrategy {
 ///   `tail_ratio`, inserting an omission notice in between.
 /// - **HeadLines**: keeps the first N lines regardless of byte size, appending
 ///   a notice with the total line count.
+#[allow(clippy::string_slice)] // indices from floor/ceil_char_boundary
 pub fn truncate_with_strategy(
     s: String,
     max_bytes: usize,
@@ -782,8 +786,8 @@ pub fn truncate_with_strategy(
             let head_bytes = max_bytes.saturating_sub(tail_bytes);
 
             // Ensure we don't split in the middle of a multi-byte char.
-            let head_end = floor_char_boundary(&s, head_bytes);
-            let tail_start = ceil_char_boundary(&s, s.len().saturating_sub(tail_bytes));
+            let head_end = s.floor_char_boundary(head_bytes);
+            let tail_start = s.ceil_char_boundary(s.len().saturating_sub(tail_bytes));
 
             let omitted = s.len() - head_end - (s.len() - tail_start);
             format!(
@@ -804,30 +808,6 @@ pub fn truncate_with_strategy(
             format!("{kept}\n[truncated: {total_lines} lines, showing first {max_lines}]")
         }
     }
-}
-
-/// Find the largest byte index <= `i` that is a char boundary.
-fn floor_char_boundary(s: &str, i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    let mut idx = i;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
-/// Find the smallest byte index >= `i` that is a char boundary.
-fn ceil_char_boundary(s: &str, i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    let mut idx = i;
-    while idx < s.len() && !s.is_char_boundary(idx) {
-        idx += 1;
-    }
-    idx
 }
 
 /// Parse raw JSON arguments into a typed struct.

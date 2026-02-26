@@ -192,8 +192,12 @@ fn load_unconditional(
 /// Extract a `## Compaction Instructions` section from content.
 ///
 /// Returns `(main_content, Option<compaction_section>)`. The compaction
+/// # Safety (string slicing)
+/// All byte indices come from `find()` on ASCII-only patterns (`HEADER`, `"\n## "`),
+/// so they are always valid char boundaries.
 /// section includes everything from the `## Compaction Instructions` heading
 /// to the next `## ` heading or end of content.
+#[allow(clippy::string_slice)]
 fn extract_compaction_section(content: &str) -> (String, Option<String>) {
     const HEADER: &str = "## Compaction Instructions";
     let Some(start) = content.find(HEADER) else {
@@ -233,6 +237,7 @@ fn extract_compaction_section(content: &str) -> (String, Option<String>) {
 /// serde_yaml dependency.
 ///
 /// Returns `(glob_patterns, body_after_frontmatter)`.
+#[allow(clippy::string_slice)] // indices from find() on ASCII `"---"` patterns
 fn parse_frontmatter(content: &str) -> (Vec<String>, &str) {
     if !content.starts_with("---") {
         return (Vec::new(), content);
