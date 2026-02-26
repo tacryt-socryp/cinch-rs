@@ -16,8 +16,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-cinch-rs = { path = "../cinch-rs", version = "0.3.0" }
-cinch-tui = { path = "../cinch-tui", version = "0.3.0" }
+cinch-rs = { path = "../cinch-rs" }
+cinch-tui = { path = "../cinch-tui" }
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
