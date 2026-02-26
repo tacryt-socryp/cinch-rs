@@ -26,10 +26,14 @@ pub fn format_countdown(remaining: Duration) -> String {
     }
 }
 
-/// Truncate a string to a maximum length, appending "..." if truncated.
+/// Truncate a string to a maximum byte length, appending "..." if truncated.
+///
+/// Uses [`str::floor_char_boundary`] so the cut never falls inside a
+/// multi-byte UTF-8 character.
 pub fn truncate_str(s: &str, max: usize) -> String {
     if s.len() > max {
-        format!("{}...", &s[..max])
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
     } else {
         s.to_string()
     }
@@ -699,6 +703,19 @@ mod tests {
         let result = truncate_str("hello world this is long", 11);
         assert!(result.ends_with("..."));
         assert!(result.len() <= 14); // 11 + "..."
+    }
+
+    #[test]
+    fn truncate_str_multibyte_boundary() {
+        // '→' is a 3-byte UTF-8 character (bytes 169..172 in a longer string).
+        // Cutting in the middle of it must not panic.
+        let s = "content=# Agent Memory\n\nSome text with arrows → Recipe → Done";
+        // Pick a max that would land inside '→'.
+        let arrow_start = s.find('→').unwrap();
+        let result = truncate_str(s, arrow_start + 1); // inside the multi-byte char
+        assert!(result.ends_with("..."));
+        // The cut should back up to the char boundary before '→'.
+        assert!(!result.contains('→'));
     }
 
     #[test]
