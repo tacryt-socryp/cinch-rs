@@ -169,6 +169,7 @@ fn estimate_tokens_for_messages(messages: &[Message], chars_per_token: f64) -> u
 }
 
 /// Extract a short argument summary from raw JSON arguments for use in placeholders.
+#[allow(clippy::string_slice)] // all indices from floor_char_boundary
 pub fn summarize_args(arguments: &str, max_len: usize) -> String {
     // Try to parse and extract key fields.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
@@ -202,14 +203,16 @@ pub fn summarize_args(arguments: &str, max_len: usize) -> String {
             .collect();
         let summary = parts.join(", ");
         if summary.len() > max_len {
-            return format!("{}...", &summary[..max_len.saturating_sub(3)]);
+            let end = summary.floor_char_boundary(max_len.saturating_sub(3));
+            return format!("{}...", &summary[..end]);
         }
         return summary;
     }
 
     // Fallback: truncate raw arguments.
     if arguments.len() > max_len {
-        format!("{}...", &arguments[..max_len.saturating_sub(3)])
+        let end = arguments.floor_char_boundary(max_len.saturating_sub(3));
+        format!("{}...", &arguments[..end])
     } else {
         arguments.to_string()
     }

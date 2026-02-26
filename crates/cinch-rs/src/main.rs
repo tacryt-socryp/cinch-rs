@@ -295,6 +295,7 @@ fn load_tools(path: &str) -> Result<cinch_rs::tools::core::ToolSet, String> {
 }
 
 /// Substitute {{param}} placeholders in a command template.
+#[allow(clippy::string_slice)] // indices track ASCII-only `{{`/`}}` delimiters
 fn render_command(template: &str, arguments_json: &str) -> Result<String, String> {
     let args: serde_json::Value = serde_json::from_str(arguments_json)
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));

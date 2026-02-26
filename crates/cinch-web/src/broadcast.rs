@@ -198,6 +198,7 @@ impl EventHandler for WebBroadcastHandler {
                 } else {
                     let is_error = result.starts_with("Error") || result.starts_with("error:");
                     // Truncate large results for WebSocket transport.
+                    #[allow(clippy::string_slice)] // end from floor_char_boundary
                     let truncated = if result.len() > MAX_WS_TOOL_RESULT_BYTES {
                         let end = result.floor_char_boundary(MAX_WS_TOOL_RESULT_BYTES);
                         let cut = &result[..end];

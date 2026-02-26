@@ -7,6 +7,9 @@ description = "Generic terminal UI for cinch-rs powered agents"
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 cinch-rs = { path = "../cinch-rs", version = "0.3.0" }
 ratatui = "0.29"

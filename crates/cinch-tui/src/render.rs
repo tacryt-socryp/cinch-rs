@@ -30,6 +30,7 @@ pub fn format_countdown(remaining: Duration) -> String {
 ///
 /// Uses [`str::floor_char_boundary`] so the cut never falls inside a
 /// multi-byte UTF-8 character.
+#[allow(clippy::string_slice)] // end from floor_char_boundary
 pub fn truncate_str(s: &str, max: usize) -> String {
     if s.len() > max {
         let end = s.floor_char_boundary(max);

@@ -467,10 +467,11 @@ impl ToolSet {
             elapsed.as_secs_f64() * 1000.0,
             result.len()
         );
-        trace!(
-            "Tool {name} result preview: {}",
-            &result[..result.len().min(300)]
-        );
+        {
+            #[allow(clippy::string_slice)] // index from floor_char_boundary
+            let preview = &result[..result.floor_char_boundary(300)];
+            trace!("Tool {name} result preview: {preview}");
+        }
 
         // Wrap errors in structured reflection for better LLM self-correction.
         let result = if result.starts_with("Error:") {
@@ -736,6 +737,7 @@ pub fn log_tool_call(name: &str, arguments: &str) {
 ///
 /// This is a convenience wrapper for [`TruncationStrategy::Head`]. For
 /// head-and-tail or line-based truncation, use [`truncate_with_strategy`].
+#[allow(clippy::string_slice)] // end is from floor_char_boundary
 pub fn truncate_result(s: String, max: usize) -> String {
     if s.len() > max {
         let end = s.floor_char_boundary(max);
@@ -766,6 +768,7 @@ pub enum TruncationStrategy {
 ///   `tail_ratio`, inserting an omission notice in between.
 /// - **HeadLines**: keeps the first N lines regardless of byte size, appending
 ///   a notice with the total line count.
+#[allow(clippy::string_slice)] // indices from floor/ceil_char_boundary
 pub fn truncate_with_strategy(
     s: String,
     max_bytes: usize,
