@@ -26,11 +26,7 @@ pub(crate) fn handle_key_event(
     }
 }
 
-fn handle_normal_key(
-    key: crossterm::event::KeyEvent,
-    app: &mut App,
-    state: &Arc<Mutex<UiState>>,
-) {
+fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc<Mutex<UiState>>) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => {

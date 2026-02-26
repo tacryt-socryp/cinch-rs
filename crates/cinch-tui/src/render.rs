@@ -61,13 +61,19 @@ pub fn result_preview(raw: &str, max_len: usize) -> String {
 }
 
 /// Map a log level to a ratatui [`Style`].
+///
+/// Palette is optimised for light-mode terminals and colour-blind
+/// accessibility (no red/green-only distinctions, no yellow/cyan that
+/// wash out on light backgrounds).
 pub fn log_level_style(level: LogLevel) -> Style {
     match level {
         LogLevel::Trace => Style::default().fg(Color::DarkGray),
-        LogLevel::Debug => Style::default().fg(Color::Cyan),
-        LogLevel::Info => Style::default().fg(Color::Green),
-        LogLevel::Warn => Style::default().fg(Color::Yellow),
-        LogLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        LogLevel::Debug => Style::default().fg(Color::DarkGray),
+        LogLevel::Info => Style::default().fg(Color::Blue),
+        LogLevel::Warn => Style::default().fg(Color::Magenta),
+        LogLevel::Error => Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     }
 }
 
@@ -220,7 +226,7 @@ fn render_status_from_snap(frame: &mut Frame, area: Rect, snap: &RenderSnapshot)
     // Build the third line with cycle count, extension spans, and timers.
     let mut line3_spans: Vec<Span<'_>> = vec![
         Span::styled("Cycle: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(snap.cycle.to_string(), Style::default().fg(Color::White)),
+        Span::styled(snap.cycle.to_string(), Style::default().fg(Color::Black)),
     ];
 
     // Domain-specific spans (pre-rendered in snapshot).
@@ -245,7 +251,7 @@ fn render_status_from_snap(frame: &mut Frame, area: Rect, snap: &RenderSnapshot)
             line3_spans.push(Span::styled(
                 countdown,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -258,7 +264,7 @@ fn render_status_from_snap(frame: &mut Frame, area: Rect, snap: &RenderSnapshot)
             let countdown = format_countdown(next_at - now);
             line3_spans.push(Span::raw("   "));
             line3_spans.push(Span::styled("Next: ", Style::default().fg(Color::DarkGray)));
-            line3_spans.push(Span::styled(countdown, Style::default().fg(Color::Cyan)));
+            line3_spans.push(Span::styled(countdown, Style::default().fg(Color::Blue)));
         }
     }
 
@@ -271,11 +277,11 @@ fn render_status_from_snap(frame: &mut Frame, area: Rect, snap: &RenderSnapshot)
             Span::styled(
                 snap.phase.clone(),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(Color::Black)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
-            Span::styled(round_str, Style::default().fg(Color::Cyan)),
+            Span::styled(round_str, Style::default().fg(Color::Blue)),
         ]),
         Line::from(vec![
             Span::styled("Model: ", Style::default().fg(Color::DarkGray)),
@@ -284,11 +290,11 @@ fn render_status_from_snap(frame: &mut Frame, area: Rect, snap: &RenderSnapshot)
             Span::styled(
                 ctx_bar,
                 if ctx_pct >= 80.0 {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 } else if ctx_pct >= 60.0 {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(Color::Magenta)
                 } else {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(Color::Blue)
                 },
             ),
         ]),
@@ -306,7 +312,7 @@ fn render_status_from_snap(frame: &mut Frame, area: Rect, snap: &RenderSnapshot)
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(Color::Blue))
         .title(title);
 
@@ -348,13 +354,13 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &[cinch_rs::ui::LogLine], ap
     };
 
     let border_color = if app.active_pane == ActivePane::Log {
-        Color::Cyan
+        Color::Blue
     } else {
         Color::DarkGray
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(border_color))
         .title(" Log ");
 
@@ -376,17 +382,19 @@ fn render_agent_output(
     app: &App,
 ) {
     let inner_height = area.height.saturating_sub(2) as usize;
-    let content_width = area.width.saturating_sub(4) as usize;
+    let content_width = area.width.saturating_sub(2) as usize;
     let arg_max = content_width.saturating_sub(16).max(20);
 
     let tool_name_style = Style::default()
-        .fg(Color::Cyan)
+        .fg(Color::Blue)
         .add_modifier(Modifier::BOLD);
-    let tool_args_style = Style::default().fg(Color::DarkGray);
-    let tool_ok_style = Style::default().fg(Color::Green);
-    let tool_err_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let text_style = Style::default().fg(Color::White);
-    let streaming_style = Style::default().fg(Color::Yellow);
+    let tool_args_style = Style::default().fg(Color::Black);
+    let tool_ok_style = Style::default().fg(Color::Blue);
+    let tool_err_style = Style::default()
+        .fg(Color::Red)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let text_style = Style::default().fg(Color::Black);
+    let streaming_style = Style::default().fg(Color::Magenta);
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -421,13 +429,18 @@ fn render_agent_output(
                     lines.push(Line::from(vec![
                         Span::styled("<< ", tool_ok_style),
                         Span::styled(name.as_str(), tool_ok_style),
-                        Span::styled(format!("  {preview}"), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("  {preview}"),
+                            Style::default()
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::DIM),
+                        ),
                     ]));
                 }
             }
             AgentEntry::UserMessage(message) => {
                 let user_style = Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD);
                 lines.push(Line::from(vec![
                     Span::styled("> ", user_style),
@@ -438,7 +451,7 @@ fn render_agent_output(
                 let header_style = Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD);
-                let item_style = Style::default().fg(Color::White);
+                let item_style = Style::default().fg(Color::Black);
                 for line in content.lines() {
                     if line.starts_with("Todo list:") {
                         lines.push(Line::from(Span::styled(line, header_style)));
@@ -467,13 +480,13 @@ fn render_agent_output(
     };
 
     let border_color = if app.active_pane == ActivePane::AgentOutput {
-        Color::Cyan
+        Color::Blue
     } else {
         Color::DarkGray
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(border_color))
         .title(" Agent Output ");
 
@@ -505,14 +518,14 @@ fn render_question_select_from_snap(
             let marker = if is_selected { "> " } else { "  " };
             let label_style = if is_selected {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::Blue)
             };
             let body_style = if is_selected {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -589,8 +602,8 @@ fn render_question_select_from_snap(
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::Magenta))
         .title(title);
 
     let paragraph = Paragraph::new(lines)
@@ -615,7 +628,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                 "[q] quit  [,] toggle logs  [Tab] switch pane  [Up/Down] scroll".to_string()
             };
             let style = if app.agent_busy {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(Color::Magenta)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
@@ -623,23 +636,22 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         }
         InputMode::QuestionSelect => (
             " [Up/Down] navigate  [Enter] select  [e] edit  [Esc] skip ".to_string(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(Color::Magenta),
         ),
         InputMode::QuestionEdit => {
             let char_count = app.input_buffer.chars().count();
-            // Show char count against max_edit_length if we had one; the
-            // actual validation happens in input.rs. Here we show a generic
-            // counter.
             (
                 format!(" Editing ({char_count} chars) \u{2014} [Enter] confirm  [Esc] cancel "),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::Blue),
             )
         }
         InputMode::FreeText => {
             let char_count = app.input_buffer.chars().count();
             (
-                format!(" Type your message ({char_count} chars) \u{2014} [Enter] send  [Esc] cancel "),
-                Style::default().fg(Color::Green),
+                format!(
+                    " Type your message ({char_count} chars) \u{2014} [Enter] send  [Esc] cancel "
+                ),
+                Style::default().fg(Color::Blue),
             )
         }
     };
@@ -652,7 +664,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(style)
         .title(title);
 

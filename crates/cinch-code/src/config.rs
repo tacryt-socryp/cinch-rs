@@ -66,10 +66,7 @@ impl CodeConfig {
             .with_streaming(self.streaming)
             .with_project_root(&self.workdir)
             .with_memory_file(memory_file)
-            .with_approval_required_tools(vec![
-                GIT_COMMIT.to_string(),
-                GIT_CHECKOUT.to_string(),
-            ]);
+            .with_approval_required_tools(vec![GIT_COMMIT.to_string(), GIT_CHECKOUT.to_string()]);
 
         config.session.sessions_dir = sessions_dir;
 
@@ -146,8 +143,16 @@ mod tests {
     fn build_harness_config_gates_mutation_tools() {
         let config = CodeConfig::default();
         let harness = config.build_harness_config();
-        assert!(harness.approval_required_tools.contains(&"git_commit".to_string()));
-        assert!(harness.approval_required_tools.contains(&"git_checkout".to_string()));
+        assert!(
+            harness
+                .approval_required_tools
+                .contains(&"git_commit".to_string())
+        );
+        assert!(
+            harness
+                .approval_required_tools
+                .contains(&"git_checkout".to_string())
+        );
     }
 
     #[test]

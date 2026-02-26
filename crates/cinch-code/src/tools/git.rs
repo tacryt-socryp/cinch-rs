@@ -397,10 +397,7 @@ impl Tool for GitBranch {
             .when_not_to_use("When you need to switch branches — use git_checkout instead")
             .parameters_for::<GitBranchArgs>()
             .example("git_branch()", "[exit: 0]\n* main\n  feature-x")
-            .example(
-                "git_branch(create='feature-y')",
-                "[exit: 0]\n",
-            )
+            .example("git_branch(create='feature-y')", "[exit: 0]\n")
             .example(
                 "git_branch(delete='feature-x')",
                 "[exit: 0]\nDeleted branch feature-x",
@@ -413,8 +410,11 @@ impl Tool for GitBranch {
         let workdir = self.workdir.clone();
         let arguments = arguments.to_string();
         Box::pin(async move {
-            let args: GitBranchArgs = serde_json::from_str(&arguments)
-                .unwrap_or(GitBranchArgs { create: None, start_point: None, delete: None });
+            let args: GitBranchArgs = serde_json::from_str(&arguments).unwrap_or(GitBranchArgs {
+                create: None,
+                start_point: None,
+                delete: None,
+            });
 
             if let Some(ref name) = args.create {
                 if name.is_empty() {

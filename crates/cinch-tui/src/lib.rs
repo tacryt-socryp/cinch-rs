@@ -158,10 +158,7 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
             };
 
             // Agent is "busy" when running and not waiting for user input.
-            let busy = s.running
-                && s.active_question
-                    .as_ref()
-                    .is_none_or(|aq| aq.done);
+            let busy = s.running && s.active_question.as_ref().is_none_or(|aq| aq.done);
 
             (s.running, s.quit_requested, qa, busy)
             // lock released here

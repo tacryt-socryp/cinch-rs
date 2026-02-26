@@ -57,6 +57,10 @@ struct Cli {
     /// resume the most recently updated session.
     #[arg(long)]
     resume: Option<String>,
+
+    /// List saved sessions and exit.
+    #[arg(long)]
+    list_sessions: bool,
 }
 
 /// Detect the git repository root for the current directory.
@@ -73,12 +77,15 @@ fn detect_git_root() -> Option<String> {
 ///
 /// Pass a trace ID directly, or `"latest"` to resolve the most recently
 /// updated session.
-fn load_session_messages(
-    sessions_dir: &std::path::Path,
-    resume_id: &str,
-) -> Result<Vec<Message>, String> {
-    let mgr = SessionManager::new(sessions_dir)
-        .map_err(|e| format!("cannot open sessions dir: {e}"))?;
+/// Loaded session checkpoint: messages and the resolved trace ID.
+struct ResumedSession {
+    messages: Vec<Message>,
+    trace_id: String,
+}
+
+fn load_session(sessions_dir: &std::path::Path, resume_id: &str) -> Result<ResumedSession, String> {
+    let mgr =
+        SessionManager::new(sessions_dir).map_err(|e| format!("cannot open sessions dir: {e}"))?;
 
     let trace_id = if resume_id.eq_ignore_ascii_case("latest") {
         let mut sessions = mgr.list_sessions()?;
@@ -95,7 +102,10 @@ fn load_session_messages(
         .load_latest_checkpoint(&trace_id)?
         .ok_or_else(|| format!("no checkpoint found for session {trace_id}"))?;
 
-    Ok(checkpoint.messages)
+    Ok(ResumedSession {
+        messages: checkpoint.messages,
+        trace_id,
+    })
 }
 
 /// Ask the user for free-text input via the TUI question system.
@@ -142,6 +152,32 @@ async fn main() {
             .to_string_lossy()
             .to_string()
     };
+
+    // Handle --list-sessions before any TUI/API setup.
+    if cli.list_sessions {
+        let sessions_dir = PathBuf::from(&workdir).join(".agents/sessions");
+        match SessionManager::new(&sessions_dir) {
+            Ok(mgr) => match mgr.list_sessions() {
+                Ok(mut sessions) => {
+                    if sessions.is_empty() {
+                        println!("No saved sessions.");
+                    } else {
+                        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                        println!("{:<40} {:>6}  PREVIEW", "SESSION ID", "ROUNDS");
+                        println!("{}", "-".repeat(80));
+                        for s in &sessions {
+                            let preview: String = s.message_preview.chars().take(60).collect();
+                            println!("{:<40} {:>6}  {}", s.trace_id, s.last_round, preview);
+                        }
+                        println!("\nResume with: cinch-code --resume <SESSION ID>");
+                    }
+                }
+                Err(e) => eprintln!("Error listing sessions: {e}"),
+            },
+            Err(e) => eprintln!("Error opening sessions dir: {e}"),
+        }
+        return;
+    }
 
     // Build config from CLI args.
     let config = CodeConfig {
@@ -197,13 +233,17 @@ async fn main() {
 
     // Conversation loop — optionally resume from a previous session.
     let mut messages = if let Some(ref resume_id) = cli.resume {
-        match load_session_messages(&harness_config.session.sessions_dir, resume_id) {
-            Ok(msgs) => {
+        match load_session(&harness_config.session.sessions_dir, resume_id) {
+            Ok(resumed) => {
                 push_agent_text(
                     &ui_state,
-                    &format!("Resumed session ({} messages from checkpoint)", msgs.len()),
+                    &format!(
+                        "Resumed session {} ({} messages from checkpoint)",
+                        resumed.trace_id,
+                        resumed.messages.len()
+                    ),
                 );
-                msgs
+                resumed.messages
             }
             Err(e) => {
                 push_agent_text(&ui_state, &format!("Failed to resume session: {e}"));
@@ -271,6 +311,7 @@ async fn main() {
             match result {
                 Ok(r) => {
                     let text = r.text();
+                    let session_id = r.trace_id.clone();
                     messages = r.messages;
 
                     // Check if this was an interrupt (not a quit).
@@ -283,9 +324,12 @@ async fn main() {
                     };
 
                     if was_interrupted {
-                        push_agent_text(&ui_state, "[Interrupted]");
-                    } else if !text.is_empty() {
-                        push_agent_text(&ui_state, &text);
+                        push_agent_text(&ui_state, &format!("[Interrupted] session: {session_id}"));
+                    } else {
+                        if !text.is_empty() {
+                            push_agent_text(&ui_state, &text);
+                        }
+                        push_agent_text(&ui_state, &format!("[Session: {session_id}]"));
                     }
                     break true;
                 }

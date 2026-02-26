@@ -1,6 +1,6 @@
 [package]
 name = "cinch-web"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Browser-based chat UI for cinch-rs powered agents"
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-cinch-rs = { path = "../cinch-rs", version = "0.2.0" }
+cinch-rs = { path = "../cinch-rs", version = "0.3.0" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
