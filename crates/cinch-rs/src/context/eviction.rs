@@ -181,7 +181,8 @@ pub fn summarize_args(arguments: &str, max_len: usize) -> String {
                 let val = match v {
                     serde_json::Value::String(s) => {
                         if s.len() > 40 {
-                            format!("\"{}...\"", &s[..37])
+                            let end = s.floor_char_boundary(37);
+                            format!("\"{}...\"", &s[..end])
                         } else {
                             format!("\"{s}\"")
                         }
@@ -189,7 +190,8 @@ pub fn summarize_args(arguments: &str, max_len: usize) -> String {
                     other => {
                         let s = other.to_string();
                         if s.len() > 40 {
-                            format!("{}...", &s[..37])
+                            let end = s.floor_char_boundary(37);
+                            format!("{}...", &s[..end])
                         } else {
                             s
                         }

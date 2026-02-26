@@ -199,7 +199,8 @@ impl EventHandler for WebBroadcastHandler {
                     let is_error = result.starts_with("Error") || result.starts_with("error:");
                     // Truncate large results for WebSocket transport.
                     let truncated = if result.len() > MAX_WS_TOOL_RESULT_BYTES {
-                        let cut = &result[..MAX_WS_TOOL_RESULT_BYTES];
+                        let end = result.floor_char_boundary(MAX_WS_TOOL_RESULT_BYTES);
+                        let cut = &result[..end];
                         format!(
                             "{cut}\n... (truncated, {total} bytes total)",
                             total = result.len()

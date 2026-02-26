@@ -292,9 +292,10 @@ impl Tool for ReadFile {
                         }
                         // Truncate long lines.
                         if line.len() > MAX_LINE_CHARS {
+                            let end = line.floor_char_boundary(MAX_LINE_CHARS);
                             output.push_str(&format!(
                                 "L{line_num}: {}... [line truncated at {MAX_LINE_CHARS} chars]\n",
-                                &line[..MAX_LINE_CHARS]
+                                &line[..end]
                             ));
                         } else {
                             output.push_str(&format!("L{line_num}: {line}\n"));
