@@ -118,17 +118,18 @@ pub fn enforce_budget(
         for &idx in &unprotected {
             let desc = &result[idx].function.description;
             if desc.len() > max_desc_chars && !desc.ends_with(TRUNCATION_MARKER) {
-                let cut_at = desc.floor_char_boundary(
-                    max_desc_chars.saturating_sub(TRUNCATION_MARKER.len()),
-                );
+                let cut_at = desc
+                    .floor_char_boundary(max_desc_chars.saturating_sub(TRUNCATION_MARKER.len()));
                 let truncated = format!("{}{}", &desc[..cut_at], TRUNCATION_MARKER);
                 result[idx].function.description = truncated;
                 truncated_count += 1;
             } else if desc.ends_with(TRUNCATION_MARKER) && desc.len() > max_desc_chars {
                 // Re-truncate an already-truncated description further.
                 let content_len = max_desc_chars.saturating_sub(TRUNCATION_MARKER.len());
-                let base = &result[idx].function.description
-                    [..result[idx].function.description.floor_char_boundary(content_len)];
+                let base = &result[idx].function.description[..result[idx]
+                    .function
+                    .description
+                    .floor_char_boundary(content_len)];
                 result[idx].function.description = format!("{base}{TRUNCATION_MARKER}");
                 truncated_count += 1;
             }

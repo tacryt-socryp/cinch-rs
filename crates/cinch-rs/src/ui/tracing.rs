@@ -144,7 +144,9 @@ impl tracing::field::Visit for MessageVisitor {
             // Strip surrounding quotes from debug-formatted strings.
             if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
                 #[allow(clippy::string_slice)] // stripping 1-byte ASCII quote chars
-                { self.message = raw[1..raw.len() - 1].to_string(); }
+                {
+                    self.message = raw[1..raw.len() - 1].to_string();
+                }
             } else {
                 self.message = raw;
             }
