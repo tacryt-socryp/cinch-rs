@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "cinch-rs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "clap",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "cinch-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cinch-rs",
  "crossterm 0.29.0",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "cinch-web"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "cinch-rs",

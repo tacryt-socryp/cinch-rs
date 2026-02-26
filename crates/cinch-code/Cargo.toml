@@ -6,6 +6,7 @@ rust-version = "1.93"
 description = "Terminal coding agent powered by cinch-rs"
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [[bin]]
 name = "cinch-code"
