@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cinch_rs::ui::{AgentEntry, LogLevel, UiState};
+use cinch_rs::ui::{AgentEntry, ContextSnapshot, LogLevel, UiState};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
@@ -113,6 +113,9 @@ struct RenderSnapshot {
 
     // Logs.
     logs: Vec<cinch_rs::ui::LogLine>,
+
+    // Context window snapshot.
+    context_snapshot: Option<ContextSnapshot>,
 }
 
 /// Convert a `Vec<Span<'_>>` to `Vec<Span<'static>>` by ensuring all
@@ -172,6 +175,11 @@ pub(crate) fn render(
             } else {
                 Vec::new()
             },
+            context_snapshot: if matches!(app.input_mode, InputMode::ContextView) {
+                s.context_snapshot.clone()
+            } else {
+                None
+            },
         }
         // lock released here
     };
@@ -179,7 +187,9 @@ pub(crate) fn render(
     render_status_from_snap(frame, chunks[0], &snap);
     render_input(frame, chunks[2], app);
 
-    if matches!(
+    if matches!(app.input_mode, InputMode::ContextView) {
+        render_context_view(frame, chunks[1], &snap, app);
+    } else if matches!(
         app.input_mode,
         InputMode::QuestionSelect | InputMode::QuestionEdit
     ) {
@@ -619,6 +629,300 @@ fn render_question_select_from_snap(
     frame.render_widget(paragraph, area);
 }
 
+// ── Context View ──────────────────────────────────────────────────────
+
+fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app: &App) {
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let content_width = area.width.saturating_sub(4) as usize;
+
+    let snapshot = match snap.context_snapshot.as_ref() {
+        Some(s) => s,
+        None => {
+            let block = Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(" Context Window ");
+            let paragraph =
+                Paragraph::new("No context snapshot available yet. Waiting for first round...")
+                    .block(block);
+            frame.render_widget(paragraph, area);
+            return;
+        }
+    };
+
+    let msg_count = snapshot.messages.len();
+    // Clamp cursor (the input handler may have overshot).
+    let cursor = app.context_cursor.min(msg_count.saturating_sub(1));
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── Zone summary section ──
+    if let Some(ref bd) = snapshot.breakdown {
+        let total = bd.total_tokens;
+        let max = snapshot.max_tokens.max(1);
+        let pct = (total as f64 / max as f64 * 100.0).min(100.0);
+
+        lines.push(Line::from(vec![
+            Span::styled("Total: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{total} / {max} tokens ({pct:.0}%)"),
+                Style::default()
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // Overall bar.
+        let bar_width = content_width.min(40);
+        let filled = ((pct / 100.0) * bar_width as f64) as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let bar_style = if pct >= 80.0 {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else if pct >= 60.0 {
+            Style::default().fg(Color::Magenta)
+        } else {
+            Style::default().fg(Color::Blue)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
+            bar_style,
+        )));
+
+        lines.push(Line::from(""));
+
+        // Per-zone bars.
+        let zones: &[(&str, usize, Color)] = &[
+            ("Prefix ", bd.prefix_tokens, Color::Blue),
+            ("History", bd.compressed_history_tokens, Color::Magenta),
+            ("Middle ", bd.middle_tokens, Color::DarkGray),
+            ("Recency", bd.recency_tokens, Color::Cyan),
+        ];
+        for &(label, tokens, color) in zones {
+            let zone_pct = if total > 0 {
+                tokens as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            let zone_bar_width = 12usize;
+            let zone_filled = ((zone_pct / 100.0) * zone_bar_width as f64) as usize;
+            let zone_empty = zone_bar_width.saturating_sub(zone_filled);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {label}  "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:>6} tok  ", tokens),
+                    Style::default().fg(Color::Black),
+                ),
+                Span::styled(
+                    format!(
+                        "{}{}",
+                        "\u{2588}".repeat(zone_filled),
+                        "\u{2591}".repeat(zone_empty),
+                    ),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    format!(" {zone_pct:>4.0}%"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+    }
+
+    // ── Separator ──
+    let sep = "\u{2500}".repeat(content_width.min(60));
+    lines.push(Line::from(Span::styled(
+        sep,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // ── Header ──
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:>3}  {:<8} {:<10} {:>6}  ", "#", "Zone", "Role", "Tokens"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Preview",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // ── Message rows ──
+    let preview_width = content_width.saturating_sub(35).max(10);
+
+    for (i, msg) in snapshot.messages.iter().enumerate() {
+        let is_cursor = i == cursor;
+
+        let zone_color = match msg.zone {
+            cinch_rs::context::ContextZone::Prefix => Color::Blue,
+            cinch_rs::context::ContextZone::CompressedHistory => Color::Magenta,
+            cinch_rs::context::ContextZone::Middle => Color::DarkGray,
+            cinch_rs::context::ContextZone::Recency => Color::Cyan,
+        };
+        let zone_label = format!("{}", msg.zone);
+
+        let role_display = if let Some(ref tn) = msg.tool_name {
+            format!("{}/{tn}", msg.role)
+        } else {
+            msg.role.clone()
+        };
+
+        let marker = if is_cursor { "> " } else { "  " };
+        let row_style = if msg.evicted {
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM)
+        } else if is_cursor {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let preview = truncate_str(&msg.preview, preview_width);
+
+        lines.push(Line::from(vec![
+            Span::styled(marker, row_style),
+            Span::styled(
+                format!("{:>3}  ", i + 1),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<8} ", zone_label),
+                Style::default().fg(zone_color),
+            ),
+            Span::styled(
+                format!("{:<10} ", truncate_str(&role_display, 10)),
+                row_style,
+            ),
+            Span::styled(format!("{:>6}  ", msg.estimated_tokens), row_style),
+            Span::styled(preview, row_style),
+        ]));
+
+        // If this message is expanded, show the full content indented.
+        if app.context_expanded == Some(i) {
+            lines.push(Line::from(""));
+            let expand_width = content_width.saturating_sub(6);
+            for content_line in msg.full_content.lines() {
+                // Word-wrap long lines.
+                if content_line.len() > expand_width && expand_width > 0 {
+                    let mut remaining = content_line;
+                    while !remaining.is_empty() {
+                        let end = remaining.floor_char_boundary(expand_width.min(remaining.len()));
+                        let end = if end == 0 {
+                            remaining.len().min(1)
+                        } else {
+                            end
+                        };
+                        #[allow(clippy::string_slice)] // end from floor_char_boundary
+                        let chunk = &remaining[..end];
+                        lines.push(Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled(chunk, Style::default().fg(Color::Black)),
+                        ]));
+                        #[allow(clippy::string_slice)] // end from floor_char_boundary
+                        {
+                            remaining = &remaining[end..];
+                        }
+                    }
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw("      "),
+                        Span::styled(content_line, Style::default().fg(Color::Black)),
+                    ]));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    // ── Scroll computation ──
+    // Find the line index where the cursor row starts.
+    let mut cursor_line_start = 0;
+    let mut cursor_line_count = 1usize;
+    {
+        let zone_summary_lines = if snapshot.breakdown.is_some() {
+            // total + bar + blank + 4 zones + blank + separator + header = 10
+            10
+        } else {
+            // separator + header
+            2
+        };
+
+        let mut line_idx = zone_summary_lines;
+        for (i, _msg) in snapshot.messages.iter().enumerate() {
+            if i == cursor {
+                cursor_line_start = line_idx;
+                cursor_line_count = 1;
+                if app.context_expanded == Some(i) {
+                    // Count expanded lines.
+                    let expand_width = content_width.saturating_sub(6).max(1);
+                    let extra: usize = _msg
+                        .full_content
+                        .lines()
+                        .map(|l| {
+                            if l.len() > expand_width {
+                                l.len().div_ceil(expand_width)
+                            } else {
+                                1
+                            }
+                        })
+                        .sum();
+                    cursor_line_count += extra + 2; // blank lines around expansion
+                }
+                break;
+            }
+            line_idx += 1;
+            if app.context_expanded == Some(i) {
+                let expand_width = content_width.saturating_sub(6).max(1);
+                let extra: usize = _msg
+                    .full_content
+                    .lines()
+                    .map(|l| {
+                        if l.len() > expand_width {
+                            l.len().div_ceil(expand_width)
+                        } else {
+                            1
+                        }
+                    })
+                    .sum();
+                line_idx += extra + 2;
+            }
+        }
+    }
+
+    // Ensure cursor is visible by auto-scrolling.
+    let scroll = if cursor_line_start + cursor_line_count > app.context_scroll + inner_height {
+        (cursor_line_start + cursor_line_count).saturating_sub(inner_height)
+    } else if cursor_line_start < app.context_scroll {
+        cursor_line_start
+    } else {
+        app.context_scroll
+    };
+
+    let title = format!(
+        " Context Window \u{2014} {} messages ",
+        snapshot.messages.len()
+    );
+
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(title);
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll as u16, 0))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
+}
+
 // ── Input Bar ─────────────────────────────────────────────────────────
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
@@ -627,10 +931,10 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             let hint = if let Some(ref msg) = app.status_message {
                 msg.clone()
             } else if app.agent_busy {
-                "[Esc] interrupt  [q] quit  [,] toggle logs  [Tab] switch pane  [Up/Down] scroll"
+                "[Esc] interrupt  [q] quit  [c] context  [,] logs  [Tab] pane  [Up/Down] scroll"
                     .to_string()
             } else {
-                "[q] quit  [,] toggle logs  [Tab] switch pane  [Up/Down] scroll".to_string()
+                "[q] quit  [c] context  [,] logs  [Tab] pane  [Up/Down] scroll".to_string()
             };
             let style = if app.agent_busy {
                 Style::default().fg(Color::Magenta)
@@ -659,10 +963,14 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Blue),
             )
         }
+        InputMode::ContextView => (
+            " [Up/Down] navigate  [Enter] expand/collapse  [c/Esc] close ".to_string(),
+            Style::default().fg(Color::Blue),
+        ),
     };
 
     let input_text = match app.input_mode {
-        InputMode::Normal | InputMode::QuestionSelect => String::new(),
+        InputMode::Normal | InputMode::QuestionSelect | InputMode::ContextView => String::new(),
         InputMode::QuestionEdit | InputMode::FreeText => {
             format!("> {}\u{2588}", app.input_buffer)
         }

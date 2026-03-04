@@ -448,6 +448,14 @@ impl<'a> Harness<'a> {
                 context_breakdown: Some(&breakdown),
             });
 
+            // ── Context snapshot for visualization ──
+            let message_details = layout.message_details();
+            self.event_handler.on_event(&HarnessEvent::ContextSnapshot {
+                messages: &message_details,
+                max_tokens: self.config.context_window_tokens,
+                breakdown: &breakdown,
+            });
+
             // ── System reminders ──
             let round_ctx = RoundContext {
                 round: round + 1,

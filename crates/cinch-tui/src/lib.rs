@@ -155,6 +155,7 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
                         QuestionAction::None
                     }
                 }
+                InputMode::ContextView => QuestionAction::None,
             };
 
             // Agent is "busy" when running and not waiting for user input.

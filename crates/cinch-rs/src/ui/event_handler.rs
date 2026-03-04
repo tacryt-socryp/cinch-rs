@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 use crate::agent::events::{EventHandler, EventResponse, HarnessEvent};
 
 use super::{
-    UiState, push_agent_text, push_agent_text_delta, push_todo_update, push_tool_executing,
-    push_tool_result, update_phase, update_round,
+    ContextBreakdownSnapshot, ContextMessageInfo, ContextSnapshot, UiState, push_agent_text,
+    push_agent_text_delta, push_todo_update, push_tool_executing, push_tool_result,
+    update_context_snapshot, update_phase, update_round,
 };
 
 /// Event handler that bridges [`HarnessEvent`] variants to [`UiState`] updates.
@@ -87,6 +88,36 @@ impl EventHandler for UiEventHandler {
             }
             HarnessEvent::RoundLimitReached { .. } => {
                 update_phase(&self.state, "Round limit reached");
+            }
+            HarnessEvent::ContextSnapshot {
+                messages,
+                max_tokens,
+                breakdown,
+            } => {
+                let snapshot = ContextSnapshot {
+                    breakdown: Some(ContextBreakdownSnapshot {
+                        prefix_tokens: breakdown.prefix_tokens,
+                        compressed_history_tokens: breakdown.compressed_history_tokens,
+                        middle_tokens: breakdown.middle_tokens,
+                        recency_tokens: breakdown.recency_tokens,
+                        total_tokens: breakdown.total_tokens,
+                    }),
+                    messages: messages
+                        .iter()
+                        .map(|d| ContextMessageInfo {
+                            zone: d.zone.clone(),
+                            role: d.role.clone(),
+                            estimated_tokens: d.estimated_tokens,
+                            preview: d.preview.clone(),
+                            full_content: d.full_content.clone(),
+                            tool_name: d.tool_name.clone(),
+                            evicted: d.evicted,
+                            message_index: d.message_index,
+                        })
+                        .collect(),
+                    max_tokens: *max_tokens,
+                };
+                update_context_snapshot(&self.state, snapshot);
             }
             _ => {}
         }
