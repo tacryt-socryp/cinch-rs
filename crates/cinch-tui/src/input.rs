@@ -23,6 +23,7 @@ pub(crate) fn handle_key_event(
         InputMode::QuestionSelect => handle_question_select_key(key, app, state),
         InputMode::QuestionEdit => handle_question_edit_key(key, app, state),
         InputMode::FreeText => handle_free_text_key(key, app, state),
+        InputMode::ContextView => handle_context_view_key(key, app),
     }
 }
 
@@ -39,6 +40,12 @@ fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc
             } else {
                 app.active_pane = ActivePane::AgentOutput;
             }
+        }
+        KeyCode::Char('c') => {
+            app.input_mode = InputMode::ContextView;
+            app.context_scroll = 0;
+            app.context_cursor = 0;
+            app.context_expanded = None;
         }
         KeyCode::Tab | KeyCode::BackTab => {
             if app.show_logs {
@@ -289,6 +296,53 @@ fn handle_free_text_key(
                     ActivePane::Log => ActivePane::AgentOutput,
                     ActivePane::AgentOutput => ActivePane::Log,
                 };
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_context_view_key(key: crossterm::event::KeyEvent, app: &mut App) {
+    match key.code {
+        KeyCode::Char('c') | KeyCode::Esc => {
+            if app.context_expanded.is_some() {
+                // Close expanded message first.
+                app.context_expanded = None;
+            } else {
+                app.input_mode = InputMode::Normal;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.context_cursor = app.context_cursor.saturating_sub(1);
+            app.context_expanded = None;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.context_cursor = app.context_cursor.saturating_add(1);
+            // Clamping happens in the render function which knows the count.
+            app.context_expanded = None;
+        }
+        KeyCode::PageUp => {
+            app.context_cursor = app.context_cursor.saturating_sub(10);
+            app.context_expanded = None;
+        }
+        KeyCode::PageDown => {
+            app.context_cursor = app.context_cursor.saturating_add(10);
+            app.context_expanded = None;
+        }
+        KeyCode::Home => {
+            app.context_cursor = 0;
+            app.context_expanded = None;
+        }
+        KeyCode::End => {
+            app.context_cursor = usize::MAX; // clamped in render
+            app.context_expanded = None;
+        }
+        KeyCode::Enter => {
+            // Toggle expansion of the highlighted message.
+            if app.context_expanded == Some(app.context_cursor) {
+                app.context_expanded = None;
+            } else {
+                app.context_expanded = Some(app.context_cursor);
             }
         }
         _ => {}

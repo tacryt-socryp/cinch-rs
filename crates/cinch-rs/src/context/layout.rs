@@ -318,6 +318,194 @@ impl ContextLayout {
         self.keep_recent
     }
 
+    /// Build a detailed per-message snapshot for context visualization.
+    ///
+    /// Returns metadata about every message across all zones, in the same
+    /// order as `to_messages()`. Each entry includes zone, role, token
+    /// estimate, content preview, and eviction status.
+    /// Apply cache breakpoints to internal messages and build details.
+    ///
+    /// When `prompt_caching` is true, sets `cache_control` on the system
+    /// message and the last user/tool message (mirroring
+    /// [`apply_cache_breakpoints`](crate::agent::execution::apply_cache_breakpoints)),
+    /// so that [`MessageDetail::has_cache_breakpoint`] is populated.
+    /// The breakpoints are cleared after building the details.
+    pub fn message_details_with_cache(&mut self, prompt_caching: bool) -> Vec<MessageDetail> {
+        if prompt_caching {
+            // Apply breakpoints: system message + last user/tool.
+            if let Some(first) = self.prefix.first_mut()
+                && first.role == crate::MessageRole::System
+            {
+                first.set_cache_control(crate::CacheControl::ephemeral());
+            }
+            // Find and mark the last user/tool message across all zones.
+            let last_user_tool = self
+                .recency_window
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == crate::MessageRole::User || m.role == crate::MessageRole::Tool)
+                .or_else(|| {
+                    self.middle.iter_mut().rev().find(|m| {
+                        m.role == crate::MessageRole::User || m.role == crate::MessageRole::Tool
+                    })
+                });
+            if let Some(msg) = last_user_tool {
+                msg.set_cache_control(crate::CacheControl::ephemeral());
+            }
+        }
+
+        let details = self.message_details();
+
+        if prompt_caching {
+            // Clear breakpoints so they don't affect downstream processing.
+            for msg in &mut self.prefix {
+                msg.cache_control = None;
+            }
+            for msg in &mut self.middle {
+                msg.cache_control = None;
+            }
+            for msg in &mut self.recency_window {
+                msg.cache_control = None;
+            }
+        }
+
+        details
+    }
+
+    pub fn message_details(&self) -> Vec<MessageDetail> {
+        let mut details = Vec::new();
+        let mut idx = 0;
+
+        // Prefix zone.
+        for msg in &self.prefix {
+            details.push(Self::detail_for_message(
+                msg,
+                ContextZone::Prefix,
+                idx,
+                self.chars_per_token,
+            ));
+            idx += 1;
+        }
+
+        // Compressed history zone (synthetic messages).
+        if let Some(ref summary) = self.compressed_history {
+            let user_content = format!("<context_summary>\n{summary}\n</context_summary>");
+            let user_msg = Message::user(&user_content);
+            details.push(Self::detail_for_message(
+                &user_msg,
+                ContextZone::CompressedHistory,
+                idx,
+                self.chars_per_token,
+            ));
+            idx += 1;
+
+            let ack_msg = Message::assistant_text(
+                "I've reviewed the context summary and will continue from where I left off.",
+            );
+            details.push(Self::detail_for_message(
+                &ack_msg,
+                ContextZone::CompressedHistory,
+                idx,
+                self.chars_per_token,
+            ));
+            idx += 1;
+        }
+
+        // Middle zone.
+        for msg in &self.middle {
+            details.push(Self::detail_for_message(
+                msg,
+                ContextZone::Middle,
+                idx,
+                self.chars_per_token,
+            ));
+            idx += 1;
+        }
+
+        // Recency window.
+        for msg in &self.recency_window {
+            details.push(Self::detail_for_message(
+                msg,
+                ContextZone::Recency,
+                idx,
+                self.chars_per_token,
+            ));
+            idx += 1;
+        }
+
+        details
+    }
+
+    /// Build a [`MessageDetail`] from a single message.
+    fn detail_for_message(
+        msg: &Message,
+        zone: ContextZone,
+        index: usize,
+        chars_per_token: f64,
+    ) -> MessageDetail {
+        let role = msg.role.to_string();
+        let estimated_tokens = message_tokens(msg, chars_per_token);
+
+        // Build full content and preview.
+        let full_content = Self::message_full_content(msg);
+        let preview = Self::make_preview(&full_content, 120);
+
+        // Extract tool name from tool_calls or tool_call_id context.
+        let tool_name = msg
+            .tool_calls
+            .as_ref()
+            .and_then(|calls| calls.first().map(|c| c.function.name.clone()));
+
+        let evicted = msg
+            .content
+            .as_ref()
+            .is_some_and(|c| c.starts_with(crate::context::eviction::EVICTED_PREFIX));
+
+        let has_cache_breakpoint = msg.cache_control.is_some();
+
+        MessageDetail {
+            zone,
+            role,
+            estimated_tokens,
+            preview,
+            full_content,
+            tool_name,
+            evicted,
+            message_index: index,
+            has_cache_breakpoint,
+        }
+    }
+
+    /// Extract human-readable content from a message for display.
+    fn message_full_content(msg: &Message) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref content) = msg.content {
+            parts.push(content.clone());
+        }
+        if let Some(ref calls) = msg.tool_calls {
+            for call in calls {
+                parts.push(format!(
+                    "[tool_call] {}({})",
+                    call.function.name, call.function.arguments
+                ));
+            }
+        }
+        parts.join("\n")
+    }
+
+    /// Create a single-line preview from content, truncated to `max_len`.
+    #[allow(clippy::string_slice)]
+    fn make_preview(content: &str, max_len: usize) -> String {
+        // Take first non-empty line.
+        let first_line = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        if first_line.len() > max_len {
+            let end = first_line.floor_char_boundary(max_len.saturating_sub(1));
+            format!("{}\u{2026}", &first_line[..end])
+        } else {
+            first_line.to_string()
+        }
+    }
+
     /// Estimate tokens for a slice of messages.
     fn estimate_tokens_for(messages: &[Message], chars_per_token: f64) -> usize {
         messages
@@ -362,6 +550,56 @@ impl ContextLayout {
             total_tokens,
         }
     }
+}
+
+/// Which zone a message belongs to in the three-zone context layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextZone {
+    /// Pinned prefix: system prompt + original task.
+    Prefix,
+    /// Compressed history: running summary of completed work.
+    CompressedHistory,
+    /// Middle zone: messages not yet compacted.
+    Middle,
+    /// Recency window: last N messages, unmodified.
+    Recency,
+}
+
+impl std::fmt::Display for ContextZone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContextZone::Prefix => write!(f, "PREFIX"),
+            ContextZone::CompressedHistory => write!(f, "HISTORY"),
+            ContextZone::Middle => write!(f, "MIDDLE"),
+            ContextZone::Recency => write!(f, "RECENCY"),
+        }
+    }
+}
+
+/// Metadata about a single message in the context window, for visualization.
+#[derive(Debug, Clone)]
+pub struct MessageDetail {
+    /// Which zone this message belongs to.
+    pub zone: ContextZone,
+    /// Message role (system, user, assistant, tool).
+    pub role: String,
+    /// Estimated token count for this message.
+    pub estimated_tokens: usize,
+    /// Short content preview (first ~120 chars, single line).
+    pub preview: String,
+    /// Full content of the message (for expansion).
+    pub full_content: String,
+    /// Tool name if this is a tool-call or tool-result message.
+    pub tool_name: Option<String>,
+    /// Whether this message was evicted (replaced with a placeholder).
+    pub evicted: bool,
+    /// Index of this message in the flat `to_messages()` output.
+    pub message_index: usize,
+    /// Whether this message has a `cache_control` breakpoint set.
+    ///
+    /// Only populated when prompt caching is enabled. Indicates that the
+    /// provider was asked to cache up to (and including) this message.
+    pub has_cache_breakpoint: bool,
 }
 
 /// Per-zone breakdown of estimated context token usage.

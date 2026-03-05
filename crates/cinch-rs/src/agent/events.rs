@@ -19,7 +19,7 @@
 
 use crate::Message;
 use crate::agent::plan_execute::Phase;
-use crate::context::{ContextBreakdown, ContextUsage};
+use crate::context::{ContextBreakdown, ContextUsage, MessageDetail};
 use tracing::{debug, info, trace, warn};
 
 // ── Events ─────────────────────────────────────────────────────────
@@ -125,6 +125,18 @@ pub enum HarnessEvent<'a> {
         cached_tokens: u32,
         /// Tokens written to the provider's prompt cache.
         cache_write_tokens: u32,
+    },
+    /// Per-message context window snapshot for visualization.
+    ///
+    /// Emitted once per round after `RoundStart`, carrying detailed
+    /// per-message metadata from the context layout.
+    ContextSnapshot {
+        /// Per-message details across all zones.
+        messages: &'a [MessageDetail],
+        /// Maximum context window size in tokens.
+        max_tokens: usize,
+        /// Per-zone breakdown.
+        breakdown: &'a ContextBreakdown,
     },
 }
 
@@ -685,6 +697,18 @@ impl EventHandler for LoggingHandler {
             } => {
                 debug!(
                     "Prompt cache: {cached_tokens} tokens read, {cache_write_tokens} tokens written"
+                );
+            }
+            HarnessEvent::ContextSnapshot {
+                messages,
+                max_tokens,
+                breakdown,
+            } => {
+                debug!(
+                    "Context snapshot: {} messages, {}/{} tokens",
+                    messages.len(),
+                    breakdown.total_tokens,
+                    max_tokens,
                 );
             }
         }

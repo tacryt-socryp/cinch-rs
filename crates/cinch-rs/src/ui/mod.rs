@@ -106,6 +106,61 @@ impl LogLevel {
     }
 }
 
+// ── Context Snapshot Types ────────────────────────────────────────────
+
+/// Snapshot of context window contents for visualization.
+///
+/// Updated once per round by the harness. Contains enough data to render
+/// a per-zone breakdown and a scrollable list of individual messages.
+#[derive(Clone, Debug, Default)]
+pub struct ContextSnapshot {
+    /// Per-zone token breakdown.
+    pub breakdown: Option<ContextBreakdownSnapshot>,
+    /// Individual messages in order (all zones flattened).
+    pub messages: Vec<ContextMessageInfo>,
+    /// Max context window tokens.
+    pub max_tokens: usize,
+    /// Prompt cache statistics from the most recent API round.
+    ///
+    /// Populated after the API response arrives (via `PromptCacheStats`
+    /// event). Since caching is prefix-based, `cached_tokens` represents
+    /// a contiguous prefix of the prompt that was served from cache.
+    pub prompt_cache: Option<crate::PromptTokensDetails>,
+}
+
+/// Owned copy of [`ContextBreakdown`](crate::context::ContextBreakdown).
+#[derive(Clone, Debug)]
+pub struct ContextBreakdownSnapshot {
+    pub prefix_tokens: usize,
+    pub compressed_history_tokens: usize,
+    pub middle_tokens: usize,
+    pub recency_tokens: usize,
+    pub total_tokens: usize,
+}
+
+/// Info about a single message in the context window, for UI display.
+#[derive(Clone, Debug)]
+pub struct ContextMessageInfo {
+    /// Which zone this message belongs to.
+    pub zone: crate::context::ContextZone,
+    /// Message role (system, user, assistant, tool).
+    pub role: String,
+    /// Estimated token count.
+    pub estimated_tokens: usize,
+    /// Short content preview (first ~120 chars).
+    pub preview: String,
+    /// Full content for expansion.
+    pub full_content: String,
+    /// Tool name if this is a tool call or tool result.
+    pub tool_name: Option<String>,
+    /// Whether this message was evicted (placeholder).
+    pub evicted: bool,
+    /// Index in the flat message list.
+    pub message_index: usize,
+    /// Whether this message has a cache breakpoint annotation.
+    pub has_cache_breakpoint: bool,
+}
+
 // ── UiState ───────────────────────────────────────────────────────────
 
 /// Core UI state shared between the agent runtime and a frontend.
@@ -146,6 +201,10 @@ pub struct UiState {
     /// When the next agent cycle is scheduled to start.
     pub next_cycle_at: Option<Instant>,
 
+    // ── Context window visualization ──
+    /// Latest snapshot of context window contents, updated per round.
+    pub context_snapshot: Option<ContextSnapshot>,
+
     // ── Domain-specific extension slot ──
     pub extensions: Box<dyn UiExtension>,
 }
@@ -177,6 +236,7 @@ impl Default for UiState {
             interrupt_requested: false,
             active_question: None,
             next_cycle_at: None,
+            context_snapshot: None,
             extensions: Box::new(NoExtension),
         }
     }
@@ -304,6 +364,35 @@ pub fn set_next_cycle(state: &Arc<Mutex<UiState>>, duration: Duration) {
 /// Clear the next-cycle countdown (cycle is starting).
 pub fn clear_next_cycle(state: &Arc<Mutex<UiState>>) {
     with_state!(state, |s| { s.next_cycle_at = None });
+}
+
+/// Update the context window snapshot for visualization.
+pub fn update_context_snapshot(state: &Arc<Mutex<UiState>>, mut snapshot: ContextSnapshot) {
+    with_state!(state, |s| {
+        // Carry forward the previous round's prompt cache stats so the
+        // cache-hit overlay remains visible while waiting for the new
+        // API response. Once the response arrives, `update_prompt_cache`
+        // overwrites with fresh data.
+        if snapshot.prompt_cache.is_none()
+            && let Some(ref prev) = s.context_snapshot
+        {
+            snapshot.prompt_cache = prev.prompt_cache.clone();
+        }
+        s.context_snapshot = Some(snapshot);
+    });
+}
+
+/// Update prompt cache statistics on the current context snapshot.
+///
+/// Called after the API response arrives with cache hit/write data.
+/// Since caching is prefix-based, these stats describe which prefix
+/// of the prompt was served from cache.
+pub fn update_prompt_cache(state: &Arc<Mutex<UiState>>, details: crate::PromptTokensDetails) {
+    with_state!(state, |s| {
+        if let Some(ref mut snap) = s.context_snapshot {
+            snap.prompt_cache = Some(details);
+        }
+    });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────

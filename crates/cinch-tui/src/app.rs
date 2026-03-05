@@ -11,6 +11,8 @@ pub(crate) enum InputMode {
     QuestionEdit,
     /// Free-text input mode — user types a prompt, Enter submits, Esc cancels.
     FreeText,
+    /// Context window visualization — shows per-zone breakdown and message list.
+    ContextView,
 }
 
 /// Which pane currently receives scroll input.
@@ -42,6 +44,12 @@ pub(crate) struct App {
     /// True when the agent is actively running (not waiting for input).
     /// Used to show the interrupt hint in the status bar.
     pub(crate) agent_busy: bool,
+    /// Scroll offset in context view (lines from top).
+    pub(crate) context_scroll: usize,
+    /// Currently highlighted message index in context view.
+    pub(crate) context_cursor: usize,
+    /// Index of the expanded message (shown in full), or `None`.
+    pub(crate) context_expanded: Option<usize>,
 }
 
 impl App {
@@ -58,6 +66,9 @@ impl App {
             question_cursor: 0,
             question_scroll: 0,
             agent_busy: false,
+            context_scroll: 0,
+            context_cursor: 0,
+            context_expanded: None,
         }
     }
 }

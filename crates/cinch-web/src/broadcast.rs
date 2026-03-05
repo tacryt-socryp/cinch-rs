@@ -331,8 +331,10 @@ impl EventHandler for WebBroadcastHandler {
                     ),
                 });
             }
-            HarnessEvent::SessionStarting { .. } | HarnessEvent::SessionFinishing { .. } => {
-                // Session lifecycle events are handled by hooks, not WebSocket.
+            HarnessEvent::SessionStarting { .. }
+            | HarnessEvent::SessionFinishing { .. }
+            | HarnessEvent::ContextSnapshot { .. } => {
+                // Session lifecycle / context snapshot events not forwarded over WebSocket.
             }
             HarnessEvent::PromptCacheStats {
                 cached_tokens,
