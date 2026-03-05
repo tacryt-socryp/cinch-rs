@@ -367,8 +367,19 @@ pub fn clear_next_cycle(state: &Arc<Mutex<UiState>>) {
 }
 
 /// Update the context window snapshot for visualization.
-pub fn update_context_snapshot(state: &Arc<Mutex<UiState>>, snapshot: ContextSnapshot) {
-    with_state!(state, |s| { s.context_snapshot = Some(snapshot) });
+pub fn update_context_snapshot(state: &Arc<Mutex<UiState>>, mut snapshot: ContextSnapshot) {
+    with_state!(state, |s| {
+        // Carry forward the previous round's prompt cache stats so the
+        // cache-hit overlay remains visible while waiting for the new
+        // API response. Once the response arrives, `update_prompt_cache`
+        // overwrites with fresh data.
+        if snapshot.prompt_cache.is_none()
+            && let Some(ref prev) = s.context_snapshot
+        {
+            snapshot.prompt_cache = prev.prompt_cache.clone();
+        }
+        s.context_snapshot = Some(snapshot);
+    });
 }
 
 /// Update prompt cache statistics on the current context snapshot.
