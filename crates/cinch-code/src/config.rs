@@ -55,6 +55,9 @@ impl CodeConfig {
     /// - MEMORY.md index loading from the project root
     /// - Session directories co-located with the project
     /// - Approval gating on `git_commit`
+    ///
+    /// Note: tool usage guidelines are injected automatically by the
+    /// harness at run time via [`ToolSet::generate_guidelines`].
     pub fn build_harness_config(&self) -> HarnessConfig {
         let memory_file = PathBuf::from(&self.workdir).join("MEMORY.md");
         let sessions_dir = PathBuf::from(&self.workdir).join(".agents/sessions");

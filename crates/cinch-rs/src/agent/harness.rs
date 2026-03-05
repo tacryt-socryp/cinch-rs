@@ -249,6 +249,21 @@ impl<'a> Harness<'a> {
             );
         }
 
+        // ── Inject tool usage guidelines ──
+        // Composition-aware rules from ToolSet::generate_guidelines() are
+        // appended to the system prompt so the LLM knows how to use tools
+        // together (e.g., "prefer grep over shell('grep ...')").
+        let tool_guidelines = self.tools.generate_guidelines();
+        if !tool_guidelines.is_empty()
+            && let Some(sys_msg) = messages
+                .iter_mut()
+                .find(|m| matches!(m.role, crate::MessageRole::System))
+            && let Some(ref mut content) = sys_msg.content
+        {
+            content.push_str("\n\n");
+            content.push_str(&tool_guidelines);
+        }
+
         // ── Create initial session manifest ──
         if modules.session_manager.is_some() {
             let now = epoch_secs();
