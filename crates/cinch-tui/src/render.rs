@@ -727,6 +727,43 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
             ]));
         }
 
+        // ── Prompt cache summary (when available) ──
+        if let Some(ref cache) = snapshot.prompt_cache {
+            let cached = cache.cached_tokens.unwrap_or(0);
+            let written = cache.cache_write_tokens.unwrap_or(0);
+            if cached > 0 || written > 0 {
+                lines.push(Line::from(""));
+                let mut spans = vec![Span::styled(
+                    "  Cache   ",
+                    Style::default().fg(Color::DarkGray),
+                )];
+                if cached > 0 {
+                    spans.push(Span::styled(
+                        format!("{cached} tok cached"),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+                if cached > 0 && written > 0 {
+                    spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+                }
+                if written > 0 {
+                    spans.push(Span::styled(
+                        format!("{written} tok written"),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                // Show cache hit percentage relative to total prompt.
+                if cached > 0 && total > 0 {
+                    let cache_pct = cached as f64 / total as f64 * 100.0;
+                    spans.push(Span::styled(
+                        format!(" ({cache_pct:.0}% hit)"),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+
         lines.push(Line::from(""));
     }
 
@@ -752,6 +789,16 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+
+    // ── Compute per-message cache status ──
+    // Prompt caching is prefix-based: the first `cached_tokens` tokens of the
+    // prompt are served from cache. Walk messages to find the boundary.
+    let cached_token_limit = snapshot
+        .prompt_cache
+        .as_ref()
+        .and_then(|c| c.cached_tokens)
+        .unwrap_or(0) as usize;
+    let mut cache_running_total = 0usize;
 
     // ── Message rows ──
     let preview_width = content_width.saturating_sub(35).max(10);
@@ -786,6 +833,25 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
 
         let preview = truncate_str(&msg.preview, preview_width);
 
+        // Determine cache status for this message.
+        let cache_indicator = if cached_token_limit > 0 {
+            let msg_start = cache_running_total;
+            cache_running_total += msg.estimated_tokens;
+            if cache_running_total <= cached_token_limit {
+                // Fully within cached prefix.
+                Span::styled(" \u{25cf}", Style::default().fg(Color::Green)) // ●
+            } else if msg_start < cached_token_limit {
+                // Partially cached (cache boundary falls within this message).
+                Span::styled(" \u{25d1}", Style::default().fg(Color::Yellow)) // ◑
+            } else {
+                // Beyond cache boundary.
+                Span::raw("")
+            }
+        } else {
+            cache_running_total += msg.estimated_tokens;
+            Span::raw("")
+        };
+
         lines.push(Line::from(vec![
             Span::styled(marker, row_style),
             Span::styled(
@@ -802,6 +868,7 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
             ),
             Span::styled(format!("{:>6}  ", msg.estimated_tokens), row_style),
             Span::styled(preview, row_style),
+            cache_indicator,
         ]));
 
         // If this message is expanded, show the full content indented.
@@ -846,9 +913,12 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
     let mut cursor_line_start = 0;
     let mut cursor_line_count = 1usize;
     {
+        let has_cache_summary = snapshot.prompt_cache.as_ref().is_some_and(|c| {
+            c.cached_tokens.unwrap_or(0) > 0 || c.cache_write_tokens.unwrap_or(0) > 0
+        });
         let zone_summary_lines = if snapshot.breakdown.is_some() {
-            // total + bar + blank + 4 zones + blank + separator + header = 10
-            10
+            // total + bar + blank + 4 zones + [blank + cache_line] + blank + separator + header
+            if has_cache_summary { 12 } else { 10 }
         } else {
             // separator + header
             2

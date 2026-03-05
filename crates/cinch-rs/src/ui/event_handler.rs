@@ -18,7 +18,7 @@ use crate::agent::events::{EventHandler, EventResponse, HarnessEvent};
 use super::{
     ContextBreakdownSnapshot, ContextMessageInfo, ContextSnapshot, UiState, push_agent_text,
     push_agent_text_delta, push_todo_update, push_tool_executing, push_tool_result,
-    update_context_snapshot, update_phase, update_round,
+    update_context_snapshot, update_phase, update_prompt_cache, update_round,
 };
 
 /// Event handler that bridges [`HarnessEvent`] variants to [`UiState`] updates.
@@ -116,8 +116,21 @@ impl EventHandler for UiEventHandler {
                         })
                         .collect(),
                     max_tokens: *max_tokens,
+                    prompt_cache: None,
                 };
                 update_context_snapshot(&self.state, snapshot);
+            }
+            HarnessEvent::PromptCacheStats {
+                cached_tokens,
+                cache_write_tokens,
+            } => {
+                update_prompt_cache(
+                    &self.state,
+                    crate::PromptTokensDetails {
+                        cached_tokens: Some(*cached_tokens),
+                        cache_write_tokens: Some(*cache_write_tokens),
+                    },
+                );
             }
             _ => {}
         }

@@ -120,6 +120,12 @@ pub struct ContextSnapshot {
     pub messages: Vec<ContextMessageInfo>,
     /// Max context window tokens.
     pub max_tokens: usize,
+    /// Prompt cache statistics from the most recent API round.
+    ///
+    /// Populated after the API response arrives (via `PromptCacheStats`
+    /// event). Since caching is prefix-based, `cached_tokens` represents
+    /// a contiguous prefix of the prompt that was served from cache.
+    pub prompt_cache: Option<crate::PromptTokensDetails>,
 }
 
 /// Owned copy of [`ContextBreakdown`](crate::context::ContextBreakdown).
@@ -361,6 +367,19 @@ pub fn clear_next_cycle(state: &Arc<Mutex<UiState>>) {
 /// Update the context window snapshot for visualization.
 pub fn update_context_snapshot(state: &Arc<Mutex<UiState>>, snapshot: ContextSnapshot) {
     with_state!(state, |s| { s.context_snapshot = Some(snapshot) });
+}
+
+/// Update prompt cache statistics on the current context snapshot.
+///
+/// Called after the API response arrives with cache hit/write data.
+/// Since caching is prefix-based, these stats describe which prefix
+/// of the prompt was served from cache.
+pub fn update_prompt_cache(state: &Arc<Mutex<UiState>>, details: crate::PromptTokensDetails) {
+    with_state!(state, |s| {
+        if let Some(ref mut snap) = s.context_snapshot {
+            snap.prompt_cache = Some(details);
+        }
+    });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
