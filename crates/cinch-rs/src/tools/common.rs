@@ -242,6 +242,12 @@ impl Tool for ReadFile {
         true
     }
 
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec![
+            "When reading large files, use offset and limit to paginate rather than reading the entire file.".into(),
+        ]
+    }
+
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
         let workdir = self.workdir.clone();
         let max = self.max_result_bytes;
@@ -303,10 +309,14 @@ impl Tool for ReadFile {
                         }
                     }
 
-                    // Append truncation notice if there are more lines.
+                    // Append truncation notice with actionable next-page values.
                     if offset + limit <= total_lines {
+                        let next_offset = offset + limit;
+                        let shown_end = (offset + limit - 1).min(total_lines);
                         output.push_str(&format!(
-                            "[truncated: {total_lines} total lines. Use offset/limit for more.]"
+                            "[Showing lines {offset}-{shown_end} of {total_lines}. \
+                             Next page: read_file(path='{}', offset={next_offset}, limit={limit})]",
+                            args.path
                         ));
                     }
 
@@ -842,6 +852,12 @@ impl Tool for Shell {
         true
     }
 
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec![
+            "When shell output is truncated, use targeted commands (grep, head, tail) to get specific output ranges.".into(),
+        ]
+    }
+
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
         let workdir = self.workdir.clone();
         let blocked = self.blocked_commands.clone();
@@ -1093,6 +1109,12 @@ impl Tool for EditFile {
 
     fn is_mutation(&self) -> bool {
         true
+    }
+
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec![
+            "The old_string in edit_file must match the file content exactly, including whitespace and indentation. Copy text from read_file output.".into(),
+        ]
     }
 
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
@@ -2081,8 +2103,12 @@ mod tests {
         assert!(result.contains("L5: line 5"), "got: {result}");
         assert!(!result.contains("L6:"), "should not contain line 6");
         assert!(
-            result.contains("[truncated: 100 total lines"),
+            result.contains("Showing lines 1-5 of 100"),
             "expected truncation notice, got: {result}"
+        );
+        assert!(
+            result.contains("offset=6"),
+            "expected actionable next-page hint, got: {result}"
         );
     }
 

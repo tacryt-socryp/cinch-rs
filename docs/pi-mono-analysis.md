@@ -954,3 +954,494 @@ composition-aware guidelines would improve tool selection accuracy, especially
 as the tool set grows. The `promptSnippet`/`promptGuidelines` fields on tool
 definitions are a clean way to let tools declare their own usage instructions
 without coupling the system prompt builder to individual tool implementations.
+
+---
+
+## 11. Deep Comparison: Tool-Use in cinch-rs vs pi-mono
+
+This section provides a side-by-side analysis of every aspect of tool-use in
+both systems, identifies where cinch-rs is already ahead, where pi-mono is
+ahead, and proposes concrete improvements to make cinch-rs's tool-use best in
+class.
+
+### 11.1 Tool Definition — cinch-rs Wins
+
+**cinch-rs** has a significantly richer tool description system via `ToolSpec`:
+
+```rust
+ToolSpec::builder("grep")
+    .purpose("Search for a regex pattern in file contents")
+    .when_to_use("When you need to find text matching a pattern across multiple files")
+    .when_not_to_use("When you already know the file path — use read_file instead")
+    .parameters_for::<GrepArgs>()
+    .example("grep(pattern='TODO', glob='*.rs')", "src/main.rs\nsrc/tools/common.rs")
+    .output_format("Depends on mode: 'files' returns paths only (default)...")
+    .disambiguate("Need to read a file", "read_file", "read_file returns full content")
+    .build()
+    .to_tool_def()
+```
+
+vs pi-mono's flat `description` string:
+
+```typescript
+description: "Execute a bash command in the current working directory. Returns stdout
+and stderr. Output is truncated to last 1000 lines or 30KB."
+```
+
+**cinch-rs advantages:**
+- **Structured fields**: `purpose`, `when_to_use`, `when_not_to_use`, `examples`,
+  `output_format`, `disambiguation` — each serving a distinct role
+- **`when_not_to_use`**: The single highest-value field for preventing tool
+  confusion (EASYTOOL paper: 70% token cost reduction with structured descriptions)
+- **Disambiguation examples**: Explicitly clarify "use X not Y when Z"
+- **Progressive loading**: `to_compact_description()` sends purpose-only in the
+  tool schema, with `extended_description()` injected as a system reminder on
+  first use — saves tokens on tools the LLM never invokes
+- **Type-safe parameters**: `parameters_for::<GrepArgs>()` derives JSON Schema
+  from the Rust type, making schema and deserialization impossible to diverge
+
+**pi-mono's only advantage here**: The `promptSnippet`/`promptGuidelines` fields
+inject tool-specific instructions into the system prompt, providing a second
+channel for guidance beyond the tool schema. See 11.4 for how cinch-rs should
+adopt this.
+
+### 11.2 System Prompt — pi-mono Wins
+
+**pi-mono** dynamically assembles tool-use guidelines in the system prompt based
+on which tools are active:
+
+```
+Available tools:
+- read: Read file contents
+- bash: Execute bash commands
+- edit: Make surgical edits to files
+
+Guidelines:
+- Use read to examine files before editing (when both read + edit active)
+- Prefer grep/find/ls over bash for file exploration (when specialized tools active)
+- Use edit for precise changes (old text must match exactly)
+- Use write only for new files or complete rewrites
+```
+
+**cinch-rs** has a minimal system prompt with no tool-use instructions:
+
+```rust
+"You are a coding assistant. You have access to tools for reading, editing, \
+and searching files, running shell commands, and performing git operations.
+
+Guidelines:
+- Read files before editing them.
+- Make minimal, focused changes.
+- Use git tools to understand the repository state.
+- Explain what you're doing before making changes."
+```
+
+**What's missing in cinch-rs:**
+
+1. **No tool listing in system prompt**: The LLM only sees tools via the JSON
+   schema in the API call. Pi-mono duplicates a summary in the system prompt,
+   giving the model two representations (summary for selection, full schema for
+   invocation).
+
+2. **No conditional guidelines**: The system prompt doesn't adapt to the tool
+   set. If `grep` and `find_files` are both active, there's no guidance about
+   when to use which. If `web_search` is disabled (no API key), the prompt
+   doesn't change.
+
+3. **No tool composition rules**: No "prefer X over Y when Z" instructions.
+   The `ToolSpec::disambiguation` field partially addresses this but only in
+   the tool schema, not the system prompt.
+
+4. **No output format guidance**: The prompt doesn't tell the LLM how to
+   interpret tool output formats (e.g., "L{n}: prefix means line numbers").
+
+**cinch-rs infrastructure advantage**: The `PromptRegistry` and
+`SystemPromptBuilder` are more sophisticated than pi-mono's single
+`buildSystemPrompt()` function. cinch-rs has stable/dynamic section ordering
+for cache optimization, conditional sections with `TurnContext`, and
+`ReminderRegistry` for mid-conversation injections. The infrastructure is
+excellent — it's just not being used for tool guidance yet.
+
+### 11.3 Tool Execution — cinch-rs Wins
+
+**cinch-rs** has significantly more advanced execution mechanics:
+
+| Feature | cinch-rs | pi-mono |
+|---------|----------|---------|
+| Execution model | **Parallel (DAG-aware)** | Sequential |
+| Result caching | **FNV-1a hash cache** | None |
+| Read-before-write | **Shared ReadTracker** | Not enforced |
+| Mutation tracking | **`is_mutation()` trait method** | Not tracked |
+| Configurable timeout | **Per-ToolSet + per-Shell** | Per-tool only |
+| Argument validation | **Optional JSON Schema (schemars)** | AJV with coercion |
+| Conditional registration | **`with_if(condition, tool)`** | Dynamic via extension |
+| Disabled tools | **`DisabledTool` wrapper** | Not built-in |
+
+cinch-rs's parallel execution via DAG scheduling is a major performance
+advantage. The `cacheable()` / `is_mutation()` trait methods enable intelligent
+caching that avoids redundant tool calls.
+
+**pi-mono's advantage**: `onUpdate` callback for streaming partial results
+during long tool execution. cinch-rs returns the full result only after
+completion. This matters for `shell` tool UX — users want to see output as
+it streams.
+
+### 11.4 Error Messages — Both Strong, Different Strengths
+
+Both systems produce actionable error messages, but with different approaches.
+
+**cinch-rs** has a **two-layer error system**:
+
+1. **Tool-level errors**: Each tool returns specific messages:
+   - `edit_file`: "old_string found 3 times in src/main.rs (lines: 12, 45, 78).
+     Provide more surrounding context to make it unique, or set replace_all=true."
+   - `read_file`: "'{path}' is a directory, not a file. Use list_dir to browse
+     directories."
+   - `shell`: "potentially destructive command blocked"
+
+2. **`format_tool_failure` wrapper** (reflection.rs): Automatically wraps any
+   `Error:` result with contextual suggestions:
+   - File not found → "Use list_dir or find_files to discover the right path"
+   - Permission denied → "Try a different approach"
+   - Timeout → "Try with smaller input or different arguments"
+   - Generic → "Consider using the 'think' tool to reason about what went wrong"
+
+**pi-mono** has **LLM-actionable truncation notices**:
+- `[Showing lines 1-1000 of 5432. Use offset=1001 to continue.]`
+- `[Full output: /tmp/pi-bash-abc123.log]`
+
+cinch-rs's truncation notices are less actionable:
+- `[truncated: 5432 total lines. Use offset/limit for more.]`
+
+**Improvement opportunity**: cinch-rs truncation messages should include the
+exact offset value, not just suggest using offset/limit.
+
+### 11.5 Tool Output Truncation — Pi-mono's Bash is Better
+
+| Aspect | cinch-rs | pi-mono |
+|--------|----------|---------|
+| Read tool | Head truncation (first N lines) | Head truncation (first N lines) |
+| Shell tool | **Head+tail** (40% tail ratio) | Tail only (last N lines) |
+| Truncation notice | Generic "use offset/limit" | **Exact offset value** |
+| Overflow handling | Truncated in memory | **Temp file + path in message** |
+| Max bytes | 30KB (configurable) | 30KB |
+| Max lines | 2000 (read), no line limit (shell) | 1000 |
+
+cinch-rs's `HeadAndTail` strategy for shell output is smarter than pi-mono's
+tail-only approach — it preserves both the initial context and the final
+output. But pi-mono's temp file overflow is valuable: when shell output
+exceeds 30KB, the full output is saved to a temp file and the path is included
+in the truncation message, letting the LLM read the full output if needed.
+
+### 11.6 Concrete Improvements for cinch-rs
+
+Based on the comparison, here are the specific improvements ranked by impact:
+
+#### Priority 1: Add Tool-Use Guidelines to System Prompt
+
+**Problem**: The system prompt says nothing about how to use tools. The LLM
+relies entirely on tool schema descriptions for guidance.
+
+**Solution**: Register a "Tool Guidance" section in the `PromptRegistry` that
+generates conditional guidelines based on active tools, similar to pi-mono's
+`buildSystemPrompt()`.
+
+```rust
+// In the harness or coding agent setup:
+registry.register_stable("Tool Guidance", 15, |_| true, |_ctx| {
+    let mut guidelines = Vec::new();
+
+    // These would check which tools are active (via metadata or tool list)
+    guidelines.push(
+        "- Always read a file with read_file before editing it with edit_file."
+    );
+    guidelines.push(
+        "- Prefer grep over shell('grep ...') for file content search \
+         (respects limits, structured output)."
+    );
+    guidelines.push(
+        "- Prefer find_files over shell('find ...') for file discovery \
+         (respects limits, mtime-sorted)."
+    );
+    guidelines.push(
+        "- Use shell only when no dedicated tool covers the operation \
+         (git, build commands, data processing)."
+    );
+    guidelines.push(
+        "- When edit_file says old_string was found multiple times, \
+         include more surrounding context to disambiguate."
+    );
+
+    format!("Tool usage rules:\n{}", guidelines.join("\n"))
+});
+```
+
+**Impact**: High. Explicit "prefer X over Y" rules dramatically reduce tool
+confusion. The LLM currently has to infer these rules from the `when_not_to_use`
+field in each tool's schema, which is less effective than a consolidated
+guidelines section.
+
+#### Priority 2: Make Truncation Notices Actionable
+
+**Problem**: Current truncation messages say "use offset/limit for more" but
+don't provide the exact values.
+
+**Solution**: Include the next offset value in truncation messages.
+
+**Current** (read_file):
+```
+[truncated: 5432 total lines. Use offset/limit for more.]
+```
+
+**Proposed**:
+```
+[Showing lines 1-2000 of 5432. Use read_file(path='...', offset=2001) to continue.]
+```
+
+**Current** (shell, after head+tail truncation):
+```
+[Output truncated to 30000 bytes. Head and tail preserved.]
+```
+
+**Proposed**:
+```
+[Output truncated: showing first 60% and last 40% of 85432 bytes. \
+Full output saved to /tmp/cinch-shell-{hash}.log — use read_file to access.]
+```
+
+**Impact**: Medium-high. LLMs follow exact instructions much more reliably than
+vague suggestions. Pi-mono's `Use offset=1001 to continue` pattern is
+demonstrably effective.
+
+#### Priority 3: Add `prompt_guidelines` to the Tool Trait
+
+**Problem**: Tools can only influence the LLM through the tool schema
+description. They can't inject rules into the system prompt.
+
+**Solution**: Add an optional `prompt_guidelines()` method to the `Tool` trait
+that returns system-prompt-level usage instructions.
+
+```rust
+pub trait Tool: Send + Sync {
+    fn definition(&self) -> ToolDef;
+    fn execute(&self, arguments: &str) -> ToolFuture<'_>;
+
+    // New: system prompt guidelines contributed by this tool
+    fn prompt_guidelines(&self) -> Vec<String> { vec![] }
+
+    // Existing methods...
+    fn cacheable(&self) -> bool { false }
+    fn is_mutation(&self) -> bool { false }
+    fn extended_description(&self) -> Option<String> { None }
+}
+```
+
+Then the harness/ToolSet collects all active tools' guidelines and injects them
+into the system prompt as a consolidated "Tool Guidance" section. Each tool
+owns its own guidelines, and the system prompt adapts automatically as tools
+are added or removed.
+
+Example implementation:
+```rust
+impl Tool for EditFile {
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec![
+            "Always read a file with read_file before editing with edit_file.".into(),
+            "When edit_file reports multiple matches, include more surrounding \
+             lines in old_string to disambiguate.".into(),
+        ]
+    }
+}
+
+impl Tool for Shell {
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec![
+            "Use shell only for operations not covered by dedicated tools \
+             (git commands, build scripts, data processing).".into(),
+            "Prefer read_file over shell('cat ...'), grep over shell('grep ...'), \
+             find_files over shell('find ...').".into(),
+        ]
+    }
+}
+```
+
+**Impact**: Medium. This is the architectural foundation for Priority 1. It
+decouples tool guidance from the prompt builder, matching pi-mono's
+`promptGuidelines` field.
+
+#### Priority 4: Shell Output Temp File Overflow
+
+**Problem**: When shell output exceeds 30KB, cinch-rs truncates with
+head+tail but the full output is lost. The LLM cannot access the truncated
+middle section.
+
+**Solution**: When shell output exceeds the byte limit, write the full output
+to a temp file and include the path in the truncation notice.
+
+```rust
+if result.len() > max_result_bytes {
+    let temp_path = format!("/tmp/cinch-shell-{}.log", hash_command(&args.command));
+    tokio::fs::write(&temp_path, &result).await.ok();
+
+    let truncated = truncate_with_strategy(
+        result, max, &TruncationStrategy::HeadAndTail { tail_ratio: 0.4 }
+    );
+    format!(
+        "{truncated}\n\n[Full output ({} bytes) saved to {temp_path}. \
+         Use read_file(path='{temp_path}') to view specific sections.]",
+        result.len()
+    )
+}
+```
+
+**Impact**: Medium. Prevents information loss from long-running commands.
+Pi-mono's temp file pattern is proven effective.
+
+#### Priority 5: Composition-Aware Conditional Guidelines
+
+**Problem**: The tool guidelines in Priority 1 are static. They should adapt
+to which tools are actually registered.
+
+**Solution**: The `ToolSet` should expose a method that generates guidelines
+based on registered tools and their relationships.
+
+```rust
+impl ToolSet {
+    /// Generate composition-aware tool usage guidelines.
+    pub fn generate_guidelines(&self) -> String {
+        let mut guidelines = Vec::new();
+        let has = |name: &str| self.tools.contains_key(name);
+
+        // Read-before-edit (only when both exist)
+        if has("read_file") && has("edit_file") {
+            guidelines.push(
+                "Always read a file with read_file before editing with edit_file."
+            );
+        }
+
+        // Prefer dedicated tools over shell (when dedicated tools exist)
+        if has("shell") && has("grep") {
+            guidelines.push(
+                "Prefer grep over shell('grep ...') for searching file content."
+            );
+        }
+        if has("shell") && has("find_files") {
+            guidelines.push(
+                "Prefer find_files over shell('find ...') for finding files by name."
+            );
+        }
+        if has("shell") && has("read_file") {
+            guidelines.push(
+                "Prefer read_file over shell('cat ...') for reading file content."
+            );
+        }
+
+        // Edit vs write guidance (when both exist)
+        if has("edit_file") && has("write_file") {
+            guidelines.push(
+                "Use edit_file for modifying existing files; use write_file only \
+                 for creating new files or complete rewrites."
+            );
+        }
+
+        // Collect per-tool guidelines
+        for tool in self.tools.values() {
+            for guideline in tool.prompt_guidelines() {
+                if !guidelines.contains(&&*guideline) {
+                    guidelines.push(&guideline);
+                }
+            }
+        }
+
+        if guidelines.is_empty() {
+            return String::new();
+        }
+
+        let bullets: Vec<String> = guidelines.iter()
+            .map(|g| format!("- {g}"))
+            .collect();
+        format!("Tool usage rules:\n{}", bullets.join("\n"))
+    }
+}
+```
+
+**Impact**: Medium. Prevents dead instructions for missing tools and
+automatically adapts as the tool set changes. Pi-mono's conditional guideline
+generation is one of its best architectural choices.
+
+#### Priority 6: Fuzzy Edit Matching
+
+**Problem**: cinch-rs's `edit_file` requires exact string matching. LLMs
+frequently introduce subtle whitespace differences (trailing spaces, tab/space
+mixing, line ending variations).
+
+**Solution**: Pi-mono's edit tool uses fuzzy matching — it normalizes line
+endings and applies fuzzy whitespace matching before falling back to exact
+match. cinch-rs should add similar normalization:
+
+```rust
+// Before matching old_string in content:
+let normalized_content = normalize_whitespace(&content);
+let normalized_old = normalize_whitespace(&args.old_string);
+
+fn normalize_whitespace(s: &str) -> String {
+    s.replace("\r\n", "\n")
+     .lines()
+     .map(|line| line.trim_end())
+     .collect::<Vec<_>>()
+     .join("\n")
+}
+```
+
+Try normalized match first, fall back to exact match. Only apply the normalized
+match when there's exactly one occurrence (to preserve the uniqueness guarantee).
+
+**Impact**: Medium. Reduces edit failures from whitespace mismatches, a common
+LLM error mode. Pi-mono's fuzzy matching compensates for this gracefully.
+
+### 11.7 Summary: Improvement Priority Matrix
+
+| # | Improvement | Effort | Impact | Pi-mono Inspired |
+|---|-------------|--------|--------|-----------------|
+| 1 | Tool-use guidelines in system prompt | Low | **High** | Yes |
+| 2 | Actionable truncation notices | Low | **Med-High** | Yes |
+| 3 | `prompt_guidelines()` on Tool trait | Low | **Med** | Yes |
+| 4 | Shell temp file overflow | Med | **Med** | Yes |
+| 5 | Composition-aware conditional guidelines | Med | **Med** | Yes |
+| 6 | Fuzzy edit matching | Med | **Med** | Yes |
+
+### 11.8 What cinch-rs Should NOT Copy from pi-mono
+
+1. **Sequential tool execution**: cinch-rs's parallel DAG scheduler is strictly
+   superior. Pi-mono executes tools sequentially to support steering message
+   injection between tools, but cinch-rs can achieve the same interrupt
+   capability with its event handler system.
+
+2. **Minimal system prompt**: Pi-mono's system prompt is deliberately sparse
+   ("You are an expert coding assistant operating inside pi"). cinch-rs should
+   keep its richer, more structured prompt approach.
+
+3. **Extension-based tool registration**: Pi-mono's dynamic tool registration
+   via extensions adds runtime complexity. cinch-rs's compile-time `ToolSet`
+   composition via `.with()` is more Rust-idiomatic and catches errors earlier.
+
+4. **Skills lazy-loading**: Pi-mono loads skill instructions on-demand via the
+   `read` tool. This saves tokens but adds latency. cinch-rs's progressive
+   loading via `compact_definitions()` + `extended_description()` achieves the
+   same token savings with simpler architecture.
+
+### 11.9 What cinch-rs Already Does Better Than Pi-mono
+
+| Feature | How cinch-rs does it better |
+|---------|---------------------------|
+| **Tool descriptions** | `ToolSpec` with structured `when_to_use`, `when_not_to_use`, disambiguation |
+| **Tool execution** | Parallel DAG-aware scheduling |
+| **Result caching** | FNV-1a hash with mutation-aware invalidation |
+| **Read-before-write** | Shared `ReadTracker` across ReadFile/EditFile/WriteFile |
+| **Progressive loading** | `compact_definitions()` + `extended_description()` on first use |
+| **Error reflection** | `format_tool_failure()` wraps errors with contextual recovery suggestions |
+| **Conditional registration** | `with_if(condition, tool)` and `DisabledTool` wrapper |
+| **Shell truncation** | Head+tail strategy preserves both context and final output |
+| **Prompt caching** | `PromptRegistry` with stable/dynamic section ordering |
+| **Mid-conversation nudges** | `ReminderRegistry` with frequency control and round context |
+| **Type safety** | Rust's type system prevents entire categories of tool definition bugs |

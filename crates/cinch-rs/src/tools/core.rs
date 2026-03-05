@@ -158,6 +158,19 @@ pub trait Tool: Send + Sync {
     fn extended_description(&self) -> Option<String> {
         None
     }
+
+    /// System-prompt-level usage guidelines contributed by this tool.
+    ///
+    /// These are collected by [`ToolSet::generate_guidelines`] and injected
+    /// into the system prompt as a consolidated "Tool Guidance" section.
+    /// Unlike the tool schema `description`, guidelines target the system
+    /// prompt and can reference other tools by name to express composition
+    /// rules (e.g., "prefer grep over shell for file search").
+    ///
+    /// Returns an empty vec by default (no guidelines contributed).
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 // ── ToolSet ────────────────────────────────────────────────────────
@@ -412,6 +425,96 @@ impl ToolSet {
     /// Whether a tool mutates state and should invalidate cached results.
     pub fn is_mutation_tool(&self, tool_name: &str) -> bool {
         self.mutation_tools.contains(tool_name)
+    }
+
+    /// Check if a tool is registered by name.
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    /// Generate composition-aware tool usage guidelines for the system prompt.
+    ///
+    /// Produces a bulleted list of rules based on which tools are registered
+    /// and their declared `prompt_guidelines()`. Rules are conditional — they
+    /// only appear when the relevant tools are active. Returns an empty string
+    /// if no guidelines apply.
+    ///
+    /// This implements the "conditional guidelines" pattern from pi-mono's
+    /// `buildSystemPrompt()`, adapted for cinch-rs's `ToolSet`.
+    pub fn generate_guidelines(&self) -> String {
+        let mut guidelines: Vec<String> = Vec::new();
+        let seen: &mut HashSet<String> = &mut HashSet::new();
+
+        let mut add = |g: String| {
+            if seen.insert(g.clone()) {
+                guidelines.push(g);
+            }
+        };
+
+        // Composition rules: only emitted when both tools exist.
+        let has = |name: &str| self.tools.contains_key(name);
+
+        if has(super::names::READ_FILE) && has(super::names::EDIT_FILE) {
+            add("Always read a file with read_file before editing it with edit_file.".into());
+        }
+
+        if has(super::names::EDIT_FILE) && has(super::names::WRITE_FILE) {
+            add(
+                "Use edit_file to modify existing files. Use write_file only for \
+                 creating new files or complete rewrites."
+                    .into(),
+            );
+        }
+
+        if has(super::names::SHELL) && has(super::names::GREP) {
+            add(
+                "Prefer grep over shell('grep ...') for searching file content \
+                 (structured output, respects limits)."
+                    .into(),
+            );
+        }
+
+        if has(super::names::SHELL) && has(super::names::FIND_FILES) {
+            add(
+                "Prefer find_files over shell('find ...') for finding files by name \
+                 (mtime-sorted, respects limits)."
+                    .into(),
+            );
+        }
+
+        if has(super::names::SHELL) && has(super::names::READ_FILE) {
+            add(
+                "Prefer read_file over shell('cat ...') for reading file content \
+                 (numbered lines, supports offset/limit)."
+                    .into(),
+            );
+        }
+
+        if has(super::names::SHELL) {
+            add(
+                "Use shell only for operations not covered by dedicated tools \
+                 (git commands, build scripts, data processing)."
+                    .into(),
+            );
+        }
+
+        // Collect per-tool guidelines.
+        for tool in self.tools.values() {
+            for g in tool.prompt_guidelines() {
+                add(g);
+            }
+        }
+
+        if guidelines.is_empty() {
+            return String::new();
+        }
+
+        let bullets: String = guidelines
+            .iter()
+            .map(|g| format!("- {g}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Tool usage rules:\n{bullets}")
     }
 
     /// Execute a tool call by name, with optional validation, timing, and truncation.
