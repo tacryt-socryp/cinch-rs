@@ -108,7 +108,7 @@ struct RenderSnapshot {
     ext_secondary_spans: Vec<Span<'static>>,
 
     // Agent output.
-    agent_output: Vec<AgentEntry>,
+    agent_output: Arc<Vec<AgentEntry>>,
     streaming_buffer: String,
 
     // Logs.
@@ -420,6 +420,23 @@ fn entry_preview_line_count(entry: &AgentEntry) -> usize {
     }
 }
 
+/// Cached version of [`entry_expanded_line_count`] that stores results in
+/// `app.expand_line_cache` keyed by `(entry_index, width)`.
+fn cached_expanded_line_count(
+    app: &mut App,
+    index: usize,
+    entry: &AgentEntry,
+    expand_width: usize,
+) -> usize {
+    let key = (index, expand_width);
+    if let Some(&cached) = app.expand_line_cache.get(&key) {
+        return cached;
+    }
+    let count = entry_expanded_line_count(entry, expand_width);
+    app.expand_line_cache.insert(key, count);
+    count
+}
+
 /// Count the number of display lines an entry takes when fully expanded.
 fn entry_expanded_line_count(entry: &AgentEntry, expand_width: usize) -> usize {
     let full_content = entry_full_content(entry);
@@ -663,6 +680,11 @@ fn render_agent_output(
     let mut cursor_line_count = 1usize;
     {
         let expand_width = content_width.saturating_sub(6).max(1);
+        // Invalidate expand line cache when entry count changes.
+        if agent_output.len() != app.expand_cache_entry_count {
+            app.expand_line_cache.clear();
+            app.expand_cache_entry_count = agent_output.len();
+        }
         let mut line_idx = 0usize;
         for (i, entry) in agent_output.iter().enumerate() {
             let preview_lines = entry_preview_line_count(entry);
@@ -670,13 +692,13 @@ fn render_agent_output(
                 cursor_line_start = line_idx;
                 cursor_line_count = preview_lines;
                 if app.agent_expanded == Some(i) {
-                    cursor_line_count += entry_expanded_line_count(entry, expand_width);
+                    cursor_line_count += cached_expanded_line_count(app, i, entry, expand_width);
                 }
                 break;
             }
             line_idx += preview_lines;
             if app.agent_expanded == Some(i) {
-                line_idx += entry_expanded_line_count(entry, expand_width);
+                line_idx += cached_expanded_line_count(app, i, entry, expand_width);
             }
         }
     }

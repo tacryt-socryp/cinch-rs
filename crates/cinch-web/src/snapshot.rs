@@ -100,7 +100,7 @@ impl UiStateSnapshot {
             context_pct: state.context_pct,
             model: state.model.clone(),
             cycle: state.cycle,
-            agent_output: state.agent_output.clone(),
+            agent_output: (*state.agent_output).clone(),
             streaming_buffer: state.streaming_buffer.clone(),
             logs,
             running: state.running,

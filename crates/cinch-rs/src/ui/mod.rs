@@ -30,6 +30,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Helper to get a mutable reference to the inner `Vec` of an
+/// `Arc<Vec<T>>`, cloning only when other references exist.
+fn arc_vec_mut(arc: &mut Arc<Vec<AgentEntry>>) -> &mut Vec<AgentEntry> {
+    Arc::make_mut(arc)
+}
+
 /// Maximum log lines kept in memory.
 pub const MAX_LOG_LINES: usize = 2000;
 /// Trim to this many when the cap is exceeded.
@@ -177,7 +183,7 @@ pub struct UiState {
     pub cycle: u32,
 
     // ── Agent output stream ──
-    pub agent_output: Vec<AgentEntry>,
+    pub agent_output: Arc<Vec<AgentEntry>>,
     /// Buffer for accumulating streaming text deltas. Rendered live by the
     /// frontend; cleared when the complete `Text` event arrives.
     pub streaming_buffer: String,
@@ -228,7 +234,7 @@ impl Default for UiState {
             context_pct: 0.0,
             model: String::new(),
             cycle: 0,
-            agent_output: Vec::new(),
+            agent_output: Arc::new(Vec::new()),
             streaming_buffer: String::new(),
             logs: Vec::new(),
             running: true,
@@ -273,7 +279,7 @@ pub fn update_round(state: &Arc<Mutex<UiState>>, round: u32, max: u32, ctx_pct: 
 fn trim_agent_output(s: &mut UiState) {
     if s.agent_output.len() > MAX_AGENT_OUTPUT {
         let drain = s.agent_output.len() - AGENT_OUTPUT_TRIM_TO;
-        s.agent_output.drain(..drain);
+        arc_vec_mut(&mut s.agent_output).drain(..drain);
     }
 }
 
@@ -284,7 +290,7 @@ fn trim_agent_output(s: &mut UiState) {
 pub fn push_agent_text(state: &Arc<Mutex<UiState>>, text: &str) {
     with_state!(state, |s| {
         s.streaming_buffer.clear();
-        s.agent_output.push(AgentEntry::Text(text.to_string()));
+        arc_vec_mut(&mut s.agent_output).push(AgentEntry::Text(text.to_string()));
         trim_agent_output(&mut s);
     });
 }
@@ -301,7 +307,7 @@ pub fn push_agent_text_delta(state: &Arc<Mutex<UiState>>, delta: &str) {
 /// Record that a tool is about to execute.
 pub fn push_tool_executing(state: &Arc<Mutex<UiState>>, name: &str, arguments: &str) {
     with_state!(state, |s| {
-        s.agent_output.push(AgentEntry::ToolExecuting {
+        arc_vec_mut(&mut s.agent_output).push(AgentEntry::ToolExecuting {
             name: name.to_string(),
             arguments: arguments.to_string(),
         });
@@ -314,7 +320,7 @@ pub fn push_tool_executing(state: &Arc<Mutex<UiState>>, name: &str, arguments: &
 pub fn push_tool_result(state: &Arc<Mutex<UiState>>, name: &str, result: &str) {
     let is_error = result.starts_with("Error") || result.starts_with("error:");
     with_state!(state, |s| {
-        s.agent_output.push(AgentEntry::ToolResult {
+        arc_vec_mut(&mut s.agent_output).push(AgentEntry::ToolResult {
             name: name.to_string(),
             result: result.to_string(),
             is_error,
@@ -330,16 +336,15 @@ pub fn push_tool_result(state: &Arc<Mutex<UiState>>, name: &str, result: &str) {
 /// Otherwise a new entry is appended.
 pub fn push_todo_update(state: &Arc<Mutex<UiState>>, content: &str) {
     with_state!(state, |s| {
-        if let Some(existing) = s
-            .agent_output
+        let entries = arc_vec_mut(&mut s.agent_output);
+        if let Some(existing) = entries
             .iter_mut()
             .rev()
             .find(|e| matches!(e, AgentEntry::TodoUpdate(_)))
         {
             *existing = AgentEntry::TodoUpdate(content.to_string());
         } else {
-            s.agent_output
-                .push(AgentEntry::TodoUpdate(content.to_string()));
+            entries.push(AgentEntry::TodoUpdate(content.to_string()));
             trim_agent_output(&mut s);
         }
     });
@@ -348,8 +353,7 @@ pub fn push_todo_update(state: &Arc<Mutex<UiState>>, content: &str) {
 /// Record a user message sent from the chat UI.
 pub fn push_user_message(state: &Arc<Mutex<UiState>>, message: &str) {
     with_state!(state, |s| {
-        s.agent_output
-            .push(AgentEntry::UserMessage(message.to_string()));
+        arc_vec_mut(&mut s.agent_output).push(AgentEntry::UserMessage(message.to_string()));
         trim_agent_output(&mut s);
     });
 }

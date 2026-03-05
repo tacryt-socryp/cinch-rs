@@ -1,5 +1,7 @@
 //! TUI-local state (not shared with the agent).
 
+use std::collections::HashMap;
+
 /// Input mode for the TUI.
 pub(crate) enum InputMode {
     /// Normal mode — arrow keys scroll, `q` quits.
@@ -56,6 +58,11 @@ pub(crate) struct App {
     pub(crate) agent_expanded: Option<usize>,
     /// Scroll offset (lines from top of expanded content) when an agent entry is expanded.
     pub(crate) agent_expand_scroll: usize,
+    /// Cached expanded line counts: `(entry_index, width) -> line_count`.
+    /// Invalidated when entry count changes or expanded entry changes.
+    pub(crate) expand_line_cache: HashMap<(usize, usize), usize>,
+    /// Entry count when the cache was last valid.
+    pub(crate) expand_cache_entry_count: usize,
 }
 
 impl App {
@@ -78,6 +85,8 @@ impl App {
             agent_cursor: 0,
             agent_expanded: None,
             agent_expand_scroll: 0,
+            expand_line_cache: HashMap::new(),
+            expand_cache_entry_count: 0,
         }
     }
 }
