@@ -15,7 +15,8 @@
 
 // ── Core types ──────────────────────────────────────────────────────
 pub use crate::{
-    ChatRequest, Message, OpenRouterClient, Plugin, PluginVecExt, ToolDef, json_schema_for,
+    CacheControl, ChatRequest, ContentPart, Message, OpenRouterClient, Plugin, PluginVecExt,
+    ToolDef, json_schema_for,
 };
 
 // ── Agent runtime ───────────────────────────────────────────────────

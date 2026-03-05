@@ -384,6 +384,7 @@ mod tests {
                 prompt_tokens: Some(100),
                 completion_tokens: Some(50),
                 total_tokens: Some(150),
+                prompt_tokens_details: None,
             }),
             StreamEvent::Done,
         ];

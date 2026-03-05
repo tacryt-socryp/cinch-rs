@@ -17,7 +17,7 @@ use crate::context::layout::ContextLayout;
 use crate::tools::core::ToolSet;
 use crate::tools::dag as tool_dag;
 use crate::tools::filter::ToolFilter;
-use crate::{ChatCompletion, ChatRequest, Message, OpenRouterClient};
+use crate::{CacheControl, ChatCompletion, ChatRequest, Message, MessageRole, OpenRouterClient};
 use tracing::warn;
 
 // ── Send request ──────────────────────────────────────────────────
@@ -40,9 +40,14 @@ pub(crate) async fn send_round_request(
         None
     };
 
+    let mut request_messages = messages.to_vec();
+    if config.prompt_caching {
+        apply_cache_breakpoints(&mut request_messages);
+    }
+
     let body = ChatRequest {
         model: Some(model_for_round.to_string()),
-        messages: messages.to_vec(),
+        messages: request_messages,
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         tools: tools_option.clone(),
@@ -532,4 +537,176 @@ pub(crate) fn assemble_tool_calls_from_stream(
             })
         })
         .collect()
+}
+
+// ── Prompt caching ─────────────────────────────────────────────────
+
+/// Apply cache breakpoints to messages for prompt caching.
+///
+/// This function sets `cache_control` annotations on strategic messages
+/// to maximize cache reuse through OpenRouter:
+///
+/// 1. **System message** — always cached (stable across rounds).
+/// 2. **Last user/tool message before the end** — marks the boundary of
+///    the conversational prefix that should be cached. This means each
+///    round reuses the cached prefix from the previous round.
+///
+/// Any existing `cache_control` annotations are cleared first to avoid
+/// stale breakpoints from previous rounds.
+pub(crate) fn apply_cache_breakpoints(messages: &mut [Message]) {
+    // Clear any existing cache breakpoints.
+    for msg in messages.iter_mut() {
+        msg.cache_control = None;
+    }
+
+    if messages.is_empty() {
+        return;
+    }
+
+    // Mark the system message for caching.
+    if messages[0].role == MessageRole::System {
+        messages[0].set_cache_control(CacheControl::ephemeral());
+    }
+
+    // Mark the last user or tool message as a cache breakpoint.
+    // This captures the full conversational prefix up to the current turn.
+    if messages.len() > 1
+        && let Some(last_user_idx) = messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User || m.role == MessageRole::Tool)
+        && last_user_idx > 0
+    {
+        messages[last_user_idx].set_cache_control(CacheControl::ephemeral());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_breakpoints_system_and_last_user() {
+        let mut messages = vec![
+            Message::system("You are helpful."),
+            Message::user("Hello"),
+            Message::assistant_text("Hi there!"),
+            Message::user("Do something"),
+        ];
+
+        apply_cache_breakpoints(&mut messages);
+
+        // System message should have cache control.
+        assert!(messages[0].cache_control.is_some());
+        // Last user message should have cache control.
+        assert!(messages[3].cache_control.is_some());
+        // Middle messages should not.
+        assert!(messages[1].cache_control.is_none());
+        assert!(messages[2].cache_control.is_none());
+    }
+
+    #[test]
+    fn cache_breakpoints_with_tool_results() {
+        let mut messages = vec![
+            Message::system("System"),
+            Message::user("Task"),
+            Message::assistant_tool_calls(vec![]),
+            Message::tool_result("call-1", "result"),
+        ];
+
+        apply_cache_breakpoints(&mut messages);
+
+        assert!(messages[0].cache_control.is_some());
+        // Last tool message should get the breakpoint.
+        assert!(messages[3].cache_control.is_some());
+    }
+
+    #[test]
+    fn cache_breakpoints_single_system_message() {
+        let mut messages = vec![Message::system("System")];
+
+        apply_cache_breakpoints(&mut messages);
+
+        assert!(messages[0].cache_control.is_some());
+    }
+
+    #[test]
+    fn cache_breakpoints_empty_messages() {
+        let mut messages: Vec<Message> = vec![];
+        apply_cache_breakpoints(&mut messages);
+        // Should not panic.
+    }
+
+    #[test]
+    fn cache_breakpoints_clears_existing() {
+        let mut messages = vec![
+            Message::system("System").with_cache_control(CacheControl::ephemeral()),
+            Message::user("First").with_cache_control(CacheControl::ephemeral()),
+            Message::user("Second"),
+        ];
+
+        apply_cache_breakpoints(&mut messages);
+
+        // System keeps cache control.
+        assert!(messages[0].cache_control.is_some());
+        // First user should have been cleared.
+        assert!(messages[1].cache_control.is_none());
+        // Second user (last) should now have it.
+        assert!(messages[2].cache_control.is_some());
+    }
+
+    #[test]
+    fn message_serialization_with_cache_control() {
+        let msg = Message::system("Hello world").with_cache_control(CacheControl::ephemeral());
+        let json = serde_json::to_value(&msg).unwrap();
+
+        // Content should be an array of parts.
+        let content = json.get("content").unwrap();
+        assert!(content.is_array(), "content should be array when cached");
+        let parts = content.as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Hello world");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn message_serialization_without_cache_control() {
+        let msg = Message::system("Hello world");
+        let json = serde_json::to_value(&msg).unwrap();
+
+        // Content should be a plain string.
+        let content = json.get("content").unwrap();
+        assert!(
+            content.is_string(),
+            "content should be string without cache"
+        );
+        assert_eq!(content.as_str().unwrap(), "Hello world");
+    }
+
+    #[test]
+    fn message_serialization_cache_control_with_ttl() {
+        let msg = Message::system("Cached long").with_cache_control(CacheControl::ephemeral_1h());
+        let json = serde_json::to_value(&msg).unwrap();
+
+        let parts = json["content"].as_array().unwrap();
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(parts[0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn message_deserialization_from_string() {
+        let json = r#"{"role": "system", "content": "Hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        assert!(msg.cache_control.is_none());
+    }
+
+    #[test]
+    fn message_deserialization_from_parts_array() {
+        let json = r#"{"role": "system", "content": [{"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}}]}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        // cache_control is not deserialized (serde skip), so it's None.
+        assert!(msg.cache_control.is_none());
+    }
 }
