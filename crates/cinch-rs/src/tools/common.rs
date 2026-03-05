@@ -217,6 +217,10 @@ impl Tool for ReadFile {
         true
     }
 
+    fn self_truncating(&self) -> bool {
+        true
+    }
+
     fn prompt_guidelines(&self) -> Vec<String> {
         vec![
             "read_file returns the entire file. For large data files (csv, json, log, etc.) \
@@ -323,6 +327,10 @@ impl Tool for ListDir {
     }
 
     fn cacheable(&self) -> bool {
+        true
+    }
+
+    fn self_truncating(&self) -> bool {
         true
     }
 

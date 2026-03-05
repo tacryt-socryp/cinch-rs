@@ -159,6 +159,12 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Whether this tool handles its own result truncation and should skip
+    /// the ToolSet-level `max_result_bytes` truncation. Defaults to `false`.
+    fn self_truncating(&self) -> bool {
+        false
+    }
+
     /// System-prompt-level usage guidelines contributed by this tool.
     ///
     /// These are collected by [`ToolSet::generate_guidelines`] and injected
@@ -217,6 +223,8 @@ pub struct ToolSet {
     cacheable_tools: HashSet<String>,
     /// Tool names that mutate state (populated from `Tool::is_mutation()`).
     mutation_tools: HashSet<String>,
+    /// Tool names that handle their own truncation (populated from `Tool::self_truncating()`).
+    self_truncating_tools: HashSet<String>,
 }
 
 impl fmt::Debug for ToolSet {
@@ -238,6 +246,7 @@ impl ToolSet {
             default_timeout: None,
             cacheable_tools: HashSet::new(),
             mutation_tools: HashSet::new(),
+            self_truncating_tools: HashSet::new(),
         }
     }
 
@@ -268,6 +277,9 @@ impl ToolSet {
         }
         if tool.is_mutation() {
             self.mutation_tools.insert(name.clone());
+        }
+        if tool.self_truncating() {
+            self.self_truncating_tools.insert(name.clone());
         }
         self.tools.insert(name, Box::new(tool));
     }
@@ -579,7 +591,11 @@ impl ToolSet {
             result
         };
 
-        truncate_result(result, self.max_result_bytes)
+        if self.self_truncating_tools.contains(name) {
+            result
+        } else {
+            truncate_result(result, self.max_result_bytes)
+        }
     }
 }
 
