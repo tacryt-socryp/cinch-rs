@@ -69,15 +69,9 @@ pub struct ReadFileArgs {
 pub struct ListDirArgs {
     /// Directory path relative to repo root (e.g. 'docs/').
     pub path: String,
-    /// Maximum directory depth to recurse into. Default: 2.
+    /// Maximum directory depth to recurse into. Default: 3.
     #[serde(default)]
     pub depth: Option<u32>,
-    /// Maximum number of entries to return. Default: 50.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// 1-indexed offset for pagination. Default: 1.
-    #[serde(default)]
-    pub offset: Option<u32>,
 }
 
 /// Typed arguments for `grep`.
@@ -283,8 +277,7 @@ use shell with head, tail, awk, jq, or wc instead of read_file."
 /// List a directory tree under the working directory.
 ///
 /// Uses a native Rust recursive walk (no shell dependency) with
-/// configurable depth, limit, and offset for pagination. Path traversal
-/// (`..`) is blocked.
+/// configurable depth. Path traversal (`..`) is blocked.
 pub struct ListDir {
     workdir: String,
 }
@@ -298,10 +291,7 @@ impl ListDir {
 }
 
 /// Default maximum depth for `list_dir`.
-const DEFAULT_LIST_DIR_DEPTH: u32 = 2;
-
-/// Default entry limit for `list_dir`.
-const DEFAULT_LIST_DIR_LIMIT: u32 = 50;
+const DEFAULT_LIST_DIR_DEPTH: u32 = 3;
 
 impl Tool for ListDir {
     fn definition(&self) -> ToolDef {
@@ -321,7 +311,7 @@ impl Tool for ListDir {
             )
             .output_format(
                 "Indented tree rooted at the target directory. Directories end with '/', \
-                 symlinks end with '@'. Use limit/offset for pagination.",
+                 symlinks end with '@'.",
             )
             .disambiguate(
                 "Need to find files matching a glob pattern recursively",
@@ -350,8 +340,6 @@ impl Tool for ListDir {
             let full_path = Path::new(&workdir).join(&args.path);
 
             let depth = args.depth.unwrap_or(DEFAULT_LIST_DIR_DEPTH) as usize;
-            let limit = args.limit.unwrap_or(DEFAULT_LIST_DIR_LIMIT) as usize;
-            let offset = args.offset.unwrap_or(1).max(1) as usize - 1; // convert to 0-indexed
 
             // Resolve to absolute path for the header.
             let abs_path = match tokio::fs::canonicalize(&full_path).await {
@@ -365,28 +353,13 @@ impl Tool for ListDir {
                 return format!("Error: {e}");
             }
 
-            let total = entries.len();
-            let page: Vec<&str> = entries
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .map(|s| s.as_str())
-                .collect();
-
             let mut out = format!("Absolute path: {abs_path}\n");
-            for entry in &page {
+            for entry in &entries {
                 out.push_str(entry);
                 out.push('\n');
             }
 
-            if offset + limit < total {
-                out.push_str(&format!(
-                    "More than {} entries found ({total} total). Use offset/limit for more.",
-                    offset + limit,
-                ));
-            }
-
-            out
+            truncate_result(out, MAX_READ_RESULT_BYTES)
         })
     }
 }
@@ -1444,7 +1417,7 @@ mod tests {
 
         let tool = ListDir::new(dir.path().to_str().unwrap());
         let result = tool.execute(r#"{"path": "."}"#).await;
-        // Default depth 2: should see a/, a/file.txt, a/b/, a/b/deep.txt
+        // Default depth 3: should see a/, a/file.txt, a/b/, a/b/deep.txt
         assert!(result.contains("a/"), "expected 'a/', got:\n{result}");
         assert!(
             result.contains("file.txt"),
@@ -1452,12 +1425,12 @@ mod tests {
         );
         assert!(
             result.contains("deep.txt"),
-            "expected deep.txt at depth 2, got:\n{result}"
+            "expected deep.txt at depth 3, got:\n{result}"
         );
     }
 
     #[tokio::test]
-    async fn list_dir_depth_one() {
+    async fn list_dir_depth_zero() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("a");
         std::fs::create_dir_all(sub.join("b")).unwrap();
@@ -1476,33 +1449,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_dir_limit_and_offset() {
+    async fn list_dir_returns_all_entries() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..10 {
             std::fs::write(dir.path().join(format!("file_{i:02}.txt")), "").unwrap();
         }
 
         let tool = ListDir::new(dir.path().to_str().unwrap());
-        // Get entries 3-5 (offset=3, limit=3)
-        let result = tool
-            .execute(r#"{"path": ".", "depth": 0, "limit": 3, "offset": 3}"#)
-            .await;
-        assert!(
-            result.contains("file_02"),
-            "expected file_02 at offset 3, got:\n{result}"
-        );
-        assert!(
-            result.contains("file_04"),
-            "expected file_04, got:\n{result}"
-        );
-        assert!(
-            !result.contains("file_00"),
-            "file_00 should be before offset"
-        );
-        assert!(
-            result.contains("More than"),
-            "should indicate more entries available"
-        );
+        let result = tool.execute(r#"{"path": ".", "depth": 0}"#).await;
+        for i in 0..10 {
+            assert!(
+                result.contains(&format!("file_{i:02}.txt")),
+                "expected file_{i:02}.txt, got:\n{result}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_dir_args_schema_has_only_path_and_depth() {
+        let tool = ListDir::new("/tmp");
+        let def = tool.definition();
+        let params = def.function.parameters;
+        let props = params.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("path"), "should have path");
+        assert!(props.contains_key("depth"), "should have depth");
+        assert!(!props.contains_key("limit"), "should not have limit");
+        assert!(!props.contains_key("offset"), "should not have offset");
     }
 
     #[tokio::test]
