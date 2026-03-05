@@ -473,6 +473,19 @@ impl<'a> Harness<'a> {
                     prompt_tokens: pt,
                     completion_tokens: ct,
                 });
+
+                // Emit prompt cache stats when available.
+                if let Some(ref details) = u.prompt_tokens_details {
+                    let cached = details.cached_tokens.unwrap_or(0);
+                    let written = details.cache_write_tokens.unwrap_or(0);
+                    if cached > 0 || written > 0 {
+                        self.event_handler
+                            .on_event(&HarnessEvent::PromptCacheStats {
+                                cached_tokens: cached,
+                                cache_write_tokens: written,
+                            });
+                    }
+                }
             }
 
             // Emit reasoning content if present.

@@ -427,6 +427,93 @@ impl PluginVecExt for Vec<Plugin> {
     }
 }
 
+// ── Prompt caching types ───────────────────────────────────────────
+
+/// Cache control directive for prompt caching.
+///
+/// When attached to a message, the content is serialized as an array of
+/// content blocks with `cache_control` annotations. This enables
+/// provider-side prompt caching (e.g. Anthropic, OpenAI, Gemini via
+/// OpenRouter).
+///
+/// # Example
+///
+/// ```
+/// use cinch_rs::{Message, CacheControl};
+///
+/// let msg = Message::system("You are a helpful assistant.")
+///     .with_cache_control(CacheControl::ephemeral());
+/// ```
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CacheControl {
+    /// Cache type. Currently always `"ephemeral"`.
+    #[serde(rename = "type")]
+    pub control_type: String,
+    /// Optional TTL override. Anthropic supports `"1h"` for 1-hour TTL
+    /// (default is 5 minutes). Omit for provider default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+impl CacheControl {
+    /// Create an ephemeral cache control (default 5-minute TTL).
+    pub fn ephemeral() -> Self {
+        Self {
+            control_type: "ephemeral".to_string(),
+            ttl: None,
+        }
+    }
+
+    /// Create an ephemeral cache control with extended 1-hour TTL.
+    ///
+    /// Supported by Anthropic models. Cache writes cost 2x base pricing
+    /// (vs 1.25x for the default 5-minute TTL), reads remain 0.1x.
+    pub fn ephemeral_1h() -> Self {
+        Self {
+            control_type: "ephemeral".to_string(),
+            ttl: Some("1h".to_string()),
+        }
+    }
+}
+
+/// A content part within a message, used for prompt caching.
+///
+/// When a message has `cache_control` set, its content is serialized as
+/// `[{"type": "text", "text": "...", "cache_control": {...}}]` instead
+/// of a plain string. This is the format expected by OpenRouter for
+/// Anthropic/Gemini prompt caching.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ContentPart {
+    /// Content type. Currently always `"text"`.
+    #[serde(rename = "type")]
+    pub part_type: String,
+    /// The text content.
+    pub text: String,
+    /// Optional cache control directive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+impl ContentPart {
+    /// Create a text content part.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            part_type: "text".to_string(),
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+
+    /// Create a text content part with cache control.
+    pub fn text_cached(text: impl Into<String>, cache_control: CacheControl) -> Self {
+        Self {
+            part_type: "text".to_string(),
+            text: text.into(),
+            cache_control: Some(cache_control),
+        }
+    }
+}
+
 // ── Message types ──────────────────────────────────────────────────
 
 /// Role of a message in the conversation.
@@ -451,15 +538,126 @@ impl std::fmt::Display for MessageRole {
 }
 
 /// A message in the conversation.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+///
+/// When `cache_control` is `Some`, the `content` field is serialized as an
+/// array of content parts with cache annotations instead of a plain string.
+/// This enables provider-side prompt caching through OpenRouter.
+///
+/// The `content` field remains `Option<String>` for ergonomic access in Rust
+/// code. The custom `Serialize` implementation handles the transformation.
+#[derive(Deserialize, Clone, Debug)]
 pub struct Message {
     pub role: MessageRole,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_content")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Cache control directive. When set, `content` is serialized as an
+    /// array of content parts with the cache annotation attached.
+    #[serde(skip)]
+    pub cache_control: Option<CacheControl>,
+}
+
+/// Deserialize `content` from either a plain string or an array of content parts.
+///
+/// API responses always use plain strings, but cached request payloads
+/// (e.g. from checkpoint files) may contain the array form.
+fn deserialize_content<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct ContentVisitor;
+
+    impl<'de> de::Visitor<'de> for ContentVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string, an array of content parts, or null")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut text = String::new();
+            while let Some(part) = seq.next_element::<ContentPart>()? {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&part.text);
+            }
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        }
+    }
+
+    deserializer.deserialize_any(ContentVisitor)
+}
+
+/// Custom serializer for [`Message`] that emits content as an array of
+/// content parts when `cache_control` is set.
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        // Count fields to emit.
+        let mut field_count = 1; // role
+        if self.content.is_some() || self.cache_control.is_some() {
+            field_count += 1;
+        }
+        if self.tool_calls.is_some() {
+            field_count += 1;
+        }
+        if self.tool_call_id.is_some() {
+            field_count += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(field_count))?;
+        map.serialize_entry("role", &self.role)?;
+
+        if let Some(ref cache) = self.cache_control {
+            // Serialize content as array of parts with cache annotation.
+            if let Some(ref text) = self.content {
+                let parts = vec![ContentPart {
+                    part_type: "text".to_string(),
+                    text: text.clone(),
+                    cache_control: Some(cache.clone()),
+                }];
+                map.serialize_entry("content", &parts)?;
+            }
+        } else if let Some(ref content) = self.content {
+            map.serialize_entry("content", content)?;
+        }
+
+        if let Some(ref tool_calls) = self.tool_calls {
+            map.serialize_entry("tool_calls", tool_calls)?;
+        }
+        if let Some(ref tool_call_id) = self.tool_call_id {
+            map.serialize_entry("tool_call_id", tool_call_id)?;
+        }
+
+        map.end()
+    }
 }
 
 impl Message {
@@ -469,6 +667,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -478,6 +677,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -487,6 +687,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -496,6 +697,7 @@ impl Message {
             content: None,
             tool_calls: Some(calls),
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -505,7 +707,28 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
+            cache_control: None,
         }
+    }
+
+    /// Attach a cache control directive to this message.
+    ///
+    /// When set, the message's `content` is serialized as an array of
+    /// content parts with the cache annotation, enabling provider-side
+    /// prompt caching through OpenRouter.
+    pub fn with_cache_control(mut self, cache_control: CacheControl) -> Self {
+        self.cache_control = Some(cache_control);
+        self
+    }
+
+    /// Set cache control on this message in-place.
+    pub fn set_cache_control(&mut self, cache_control: CacheControl) {
+        self.cache_control = Some(cache_control);
+    }
+
+    /// Remove cache control from this message.
+    pub fn clear_cache_control(&mut self) {
+        self.cache_control = None;
     }
 }
 
@@ -619,11 +842,29 @@ pub struct ChatCompletion {
 }
 
 /// Token usage statistics.
+///
+/// When prompt caching is active, `prompt_tokens_details` contains
+/// `cached_tokens` (read from cache) and `cache_write_tokens` (written
+/// to cache) for cost tracking.
 #[derive(Deserialize, Debug, Clone)]
 pub struct UsageInfo {
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
     pub total_tokens: Option<u32>,
+    /// Detailed prompt token breakdown including cache hits/writes.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+/// Detailed breakdown of prompt token usage for cache tracking.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct PromptTokensDetails {
+    /// Tokens read from cache (cost reduction applies).
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
+    /// Tokens written to cache (may have write premium).
+    #[serde(default)]
+    pub cache_write_tokens: Option<u32>,
 }
 
 /// URL citation annotation returned by the web-search plugin.

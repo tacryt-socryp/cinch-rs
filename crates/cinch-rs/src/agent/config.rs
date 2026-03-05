@@ -283,6 +283,16 @@ pub struct HarnessConfig {
     /// order with stable/dynamic separation for prompt cache optimization.
     /// Default: `false`.
     pub use_prompt_registry: bool,
+    /// Enable prompt caching for the OpenRouter API.
+    ///
+    /// When `true`, the harness adds `cache_control` annotations to the
+    /// system message and the last user message before the first tool-use
+    /// round. This enables provider-side prompt caching (Anthropic, OpenAI,
+    /// Gemini) through OpenRouter's sticky routing, reducing inference costs
+    /// for multi-turn conversations.
+    ///
+    /// Default: `false`.
+    pub prompt_caching: bool,
 }
 
 impl HarnessConfig {
@@ -462,6 +472,17 @@ impl HarnessConfig {
         self
     }
 
+    /// Enable or disable prompt caching for the OpenRouter API.
+    ///
+    /// When enabled, the harness annotates the system message and the last
+    /// user message before each API call with `cache_control` directives.
+    /// This allows providers (Anthropic, OpenAI, Gemini) to cache and
+    /// reuse prompt prefixes, reducing cost for multi-turn conversations.
+    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
+        self.prompt_caching = enabled;
+        self
+    }
+
     /// Set project instructions directly.
     ///
     /// If the instructions contain compaction instructions, they are
@@ -505,6 +526,7 @@ impl Default for HarnessConfig {
             tool_budget: None,
             progressive_tools: false,
             use_prompt_registry: false,
+            prompt_caching: false,
         }
     }
 }

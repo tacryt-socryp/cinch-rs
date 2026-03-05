@@ -334,6 +334,16 @@ impl EventHandler for WebBroadcastHandler {
             HarnessEvent::SessionStarting { .. } | HarnessEvent::SessionFinishing { .. } => {
                 // Session lifecycle events are handled by hooks, not WebSocket.
             }
+            HarnessEvent::PromptCacheStats {
+                cached_tokens,
+                cache_write_tokens,
+            } => {
+                self.broadcast(WsMessage::Phase {
+                    phase: format!(
+                        "Prompt cache: {cached_tokens} tokens read, {cache_write_tokens} written"
+                    ),
+                });
+            }
         }
         None // Never controls flow.
     }

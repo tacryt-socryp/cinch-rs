@@ -119,6 +119,13 @@ pub enum HarnessEvent<'a> {
         finished: bool,
         rounds_used: u32,
     },
+    /// Prompt cache statistics for this round (emitted when caching is active).
+    PromptCacheStats {
+        /// Tokens read from the provider's prompt cache.
+        cached_tokens: u32,
+        /// Tokens written to the provider's prompt cache.
+        cache_write_tokens: u32,
+    },
 }
 
 impl HarnessEvent<'_> {
@@ -670,6 +677,14 @@ impl EventHandler for LoggingHandler {
             } => {
                 info!(
                     "Session finishing: trace_id={trace_id}, finished={finished}, rounds={rounds_used}"
+                );
+            }
+            HarnessEvent::PromptCacheStats {
+                cached_tokens,
+                cache_write_tokens,
+            } => {
+                debug!(
+                    "Prompt cache: {cached_tokens} tokens read, {cache_write_tokens} tokens written"
                 );
             }
         }
