@@ -198,8 +198,9 @@ fn register_default_reminders(registry: &mut ReminderRegistry) {
         |ctx| {
             format!(
                 "[System reminder: context usage at ~{:.0}%. \
-                 Prioritize drafting over additional research. \
-                 Wrap up tool calls and save your progress soon.]",
+                 Context compaction will happen soon. Use write_file to save your working \
+                 state (current files, progress, next steps) to a scratchpad file so you \
+                 can resume effectively after compaction.]",
                 ctx.context_usage_pct * 100.0
             )
         },
@@ -213,7 +214,9 @@ fn register_default_reminders(registry: &mut ReminderRegistry) {
         |ctx| {
             format!(
                 "[System reminder: context usage CRITICAL at ~{:.0}%. \
-                 Save drafts NOW. Do not call additional research tools.]",
+                 Context compaction is imminent. Use write_file to save your working state \
+                 to a scratchpad file NOW — include: files you are modifying, current step, \
+                 key findings, and what remains to be done. This file will survive compaction.]",
                 ctx.context_usage_pct * 100.0
             )
         },

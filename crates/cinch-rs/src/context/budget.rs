@@ -160,7 +160,9 @@ impl ContextBudget {
             Some(self.critical_message.clone().unwrap_or_else(|| {
                 format!(
                     "[Context notice: ~{:.0}% of context budget used ({} est. tokens / {} max). \
-                     Prioritize saving drafts NOW. Do not call additional research tools.]",
+                     Context compaction is imminent. Use write_file to save your working state \
+                     to a scratchpad file NOW — include: files you are modifying, current step, \
+                     key findings, and what remains to be done. This file will survive compaction.]",
                     usage.usage_pct * 100.0,
                     usage.estimated_tokens,
                     usage.max_tokens,
@@ -170,8 +172,9 @@ impl ContextBudget {
             Some(self.warning_message.clone().unwrap_or_else(|| {
                 format!(
                     "[Context notice: ~{:.0}% of context budget used. \
-                     Prioritize drafting over additional research. \
-                     Wrap up tool calls and save your draft soon.]",
+                     Context compaction will happen soon. Use write_file to save your working \
+                     state (current files, progress, next steps) to a scratchpad file so you \
+                     can resume effectively after compaction.]",
                     usage.usage_pct * 100.0,
                 )
             }))
@@ -232,7 +235,7 @@ mod tests {
         let messages = vec![];
         let advisory = budget.advisory(&messages);
         assert!(advisory.is_some());
-        assert!(advisory.unwrap().contains("Prioritize drafting"));
+        assert!(advisory.unwrap().contains("compaction will happen soon"));
     }
 
     #[test]
@@ -242,7 +245,7 @@ mod tests {
         let messages = vec![];
         let advisory = budget.advisory(&messages);
         assert!(advisory.is_some());
-        assert!(advisory.unwrap().contains("Prioritize saving drafts NOW"));
+        assert!(advisory.unwrap().contains("compaction is imminent"));
     }
 
     #[test]
