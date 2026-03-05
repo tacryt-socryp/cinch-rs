@@ -800,6 +800,35 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
         .unwrap_or(0) as usize;
     let mut cache_running_total = 0usize;
 
+    // ── Cache legend (when caching info is available) ──
+    let has_breakpoints = snapshot.messages.iter().any(|m| m.has_cache_breakpoint);
+    if has_breakpoints || cached_token_limit > 0 {
+        let mut legend_spans = vec![Span::styled(
+            "  Cache: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        if cached_token_limit > 0 {
+            legend_spans.push(Span::styled("\u{25cf}", Style::default().fg(Color::Green)));
+            legend_spans.push(Span::styled(
+                "cached ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            legend_spans.push(Span::styled("\u{25d1}", Style::default().fg(Color::Yellow)));
+            legend_spans.push(Span::styled(
+                "partial ",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if has_breakpoints {
+            legend_spans.push(Span::styled("\u{2307}", Style::default().fg(Color::Cyan)));
+            legend_spans.push(Span::styled(
+                "breakpoint",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(legend_spans));
+    }
+
     // ── Message rows ──
     let preview_width = content_width.saturating_sub(35).max(10);
 
@@ -834,22 +863,38 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
         let preview = truncate_str(&msg.preview, preview_width);
 
         // Determine cache status for this message.
+        // ● = fully cached (green), ◑ = partially cached (yellow),
+        // ⌇ = cache breakpoint requested (cyan, no hit data yet)
         let cache_indicator = if cached_token_limit > 0 {
             let msg_start = cache_running_total;
             cache_running_total += msg.estimated_tokens;
             if cache_running_total <= cached_token_limit {
                 // Fully within cached prefix.
-                Span::styled(" \u{25cf}", Style::default().fg(Color::Green)) // ●
+                if msg.has_cache_breakpoint {
+                    Span::styled(" \u{25cf}\u{2307}", Style::default().fg(Color::Green))
+                } else {
+                    Span::styled(" \u{25cf}", Style::default().fg(Color::Green))
+                }
             } else if msg_start < cached_token_limit {
                 // Partially cached (cache boundary falls within this message).
-                Span::styled(" \u{25d1}", Style::default().fg(Color::Yellow)) // ◑
+                if msg.has_cache_breakpoint {
+                    Span::styled(" \u{25d1}\u{2307}", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::styled(" \u{25d1}", Style::default().fg(Color::Yellow))
+                }
+            } else if msg.has_cache_breakpoint {
+                // Beyond cache but has breakpoint.
+                Span::styled(" \u{2307}", Style::default().fg(Color::Cyan))
             } else {
-                // Beyond cache boundary.
                 Span::raw("")
             }
         } else {
             cache_running_total += msg.estimated_tokens;
-            Span::raw("")
+            if msg.has_cache_breakpoint {
+                Span::styled(" \u{2307}", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            }
         };
 
         lines.push(Line::from(vec![
@@ -916,12 +961,14 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
         let has_cache_summary = snapshot.prompt_cache.as_ref().is_some_and(|c| {
             c.cached_tokens.unwrap_or(0) > 0 || c.cache_write_tokens.unwrap_or(0) > 0
         });
+        let has_cache_legend = has_breakpoints || cached_token_limit > 0;
         let zone_summary_lines = if snapshot.breakdown.is_some() {
-            // total + bar + blank + 4 zones + [blank + cache_line] + blank + separator + header
-            if has_cache_summary { 12 } else { 10 }
+            // total + bar + blank + 4 zones + [blank + cache_line] + blank + separator + header + [legend]
+            let base = if has_cache_summary { 12 } else { 10 };
+            if has_cache_legend { base + 1 } else { base }
         } else {
-            // separator + header
-            2
+            // separator + header + [legend]
+            if has_cache_legend { 3 } else { 2 }
         };
 
         let mut line_idx = zone_summary_lines;

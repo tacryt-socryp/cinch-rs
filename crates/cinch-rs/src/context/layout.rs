@@ -323,6 +323,55 @@ impl ContextLayout {
     /// Returns metadata about every message across all zones, in the same
     /// order as `to_messages()`. Each entry includes zone, role, token
     /// estimate, content preview, and eviction status.
+    /// Apply cache breakpoints to internal messages and build details.
+    ///
+    /// When `prompt_caching` is true, sets `cache_control` on the system
+    /// message and the last user/tool message (mirroring
+    /// [`apply_cache_breakpoints`](crate::agent::execution::apply_cache_breakpoints)),
+    /// so that [`MessageDetail::has_cache_breakpoint`] is populated.
+    /// The breakpoints are cleared after building the details.
+    pub fn message_details_with_cache(&mut self, prompt_caching: bool) -> Vec<MessageDetail> {
+        if prompt_caching {
+            // Apply breakpoints: system message + last user/tool.
+            if let Some(first) = self.prefix.first_mut()
+                && first.role == crate::MessageRole::System
+            {
+                first.set_cache_control(crate::CacheControl::ephemeral());
+            }
+            // Find and mark the last user/tool message across all zones.
+            let last_user_tool = self
+                .recency_window
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == crate::MessageRole::User || m.role == crate::MessageRole::Tool)
+                .or_else(|| {
+                    self.middle.iter_mut().rev().find(|m| {
+                        m.role == crate::MessageRole::User || m.role == crate::MessageRole::Tool
+                    })
+                });
+            if let Some(msg) = last_user_tool {
+                msg.set_cache_control(crate::CacheControl::ephemeral());
+            }
+        }
+
+        let details = self.message_details();
+
+        if prompt_caching {
+            // Clear breakpoints so they don't affect downstream processing.
+            for msg in &mut self.prefix {
+                msg.cache_control = None;
+            }
+            for msg in &mut self.middle {
+                msg.cache_control = None;
+            }
+            for msg in &mut self.recency_window {
+                msg.cache_control = None;
+            }
+        }
+
+        details
+    }
+
     pub fn message_details(&self) -> Vec<MessageDetail> {
         let mut details = Vec::new();
         let mut idx = 0;
@@ -412,6 +461,8 @@ impl ContextLayout {
             .as_ref()
             .is_some_and(|c| c.starts_with(crate::context::eviction::EVICTED_PREFIX));
 
+        let has_cache_breakpoint = msg.cache_control.is_some();
+
         MessageDetail {
             zone,
             role,
@@ -421,6 +472,7 @@ impl ContextLayout {
             tool_name,
             evicted,
             message_index: index,
+            has_cache_breakpoint,
         }
     }
 
@@ -543,6 +595,11 @@ pub struct MessageDetail {
     pub evicted: bool,
     /// Index of this message in the flat `to_messages()` output.
     pub message_index: usize,
+    /// Whether this message has a `cache_control` breakpoint set.
+    ///
+    /// Only populated when prompt caching is enabled. Indicates that the
+    /// provider was asked to cache up to (and including) this message.
+    pub has_cache_breakpoint: bool,
 }
 
 /// Per-zone breakdown of estimated context token usage.

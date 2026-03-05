@@ -113,6 +113,7 @@ impl EventHandler for UiEventHandler {
                             tool_name: d.tool_name.clone(),
                             evicted: d.evicted,
                             message_index: d.message_index,
+                            has_cache_breakpoint: d.has_cache_breakpoint,
                         })
                         .collect(),
                     max_tokens: *max_tokens,

@@ -449,7 +449,7 @@ impl<'a> Harness<'a> {
             });
 
             // ── Context snapshot for visualization ──
-            let message_details = layout.message_details();
+            let message_details = layout.message_details_with_cache(self.config.prompt_caching);
             self.event_handler.on_event(&HarnessEvent::ContextSnapshot {
                 messages: &message_details,
                 max_tokens: self.config.context_window_tokens,

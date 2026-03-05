@@ -157,6 +157,8 @@ pub struct ContextMessageInfo {
     pub evicted: bool,
     /// Index in the flat message list.
     pub message_index: usize,
+    /// Whether this message has a cache breakpoint annotation.
+    pub has_cache_breakpoint: bool,
 }
 
 // ── UiState ───────────────────────────────────────────────────────────
