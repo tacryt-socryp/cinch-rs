@@ -398,6 +398,14 @@ async fn collect_dir_entries(
 
     let indent = "  ".repeat(current_depth);
     for (name, ft) in &children {
+        // Skip noisy/internal entries at the repo root.
+        if current_depth == 0 && matches!(name.as_str(), ".git" | ".agents") {
+            continue;
+        }
+        if name == ".DS_Store" {
+            continue;
+        }
+
         let suffix = if ft.is_dir() {
             "/"
         } else if ft.is_symlink() {
