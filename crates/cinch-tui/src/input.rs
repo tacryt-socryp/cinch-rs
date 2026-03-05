@@ -31,7 +31,12 @@ fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => {
-            state.lock().unwrap().interrupt_requested = true;
+            if app.agent_expanded.is_some() {
+                // Close expanded agent entry first.
+                app.agent_expanded = None;
+            } else {
+                state.lock().unwrap().interrupt_requested = true;
+            }
         }
         KeyCode::Char(',') => {
             app.show_logs = !app.show_logs;
@@ -47,6 +52,18 @@ fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc
             app.context_cursor = 0;
             app.context_expanded = None;
         }
+        KeyCode::Enter => {
+            // Toggle expansion of the highlighted agent entry.
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded == Some(app.agent_cursor) {
+                    app.agent_expanded = None;
+                    app.agent_expand_scroll = 0;
+                } else {
+                    app.agent_expanded = Some(app.agent_cursor);
+                    app.agent_expand_scroll = 0;
+                }
+            }
+        }
         KeyCode::Tab | KeyCode::BackTab => {
             if app.show_logs {
                 app.active_pane = match app.active_pane {
@@ -56,33 +73,75 @@ fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_add(3);
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded.is_some() {
+                    // Scroll within expanded content.
+                    app.agent_expand_scroll = app.agent_expand_scroll.saturating_sub(1);
+                } else {
+                    app.agent_cursor = app.agent_cursor.saturating_sub(1);
+                }
+            } else {
+                app.log_scroll = app.log_scroll.saturating_add(3);
+            }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_sub(3);
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded.is_some() {
+                    // Scroll within expanded content.
+                    app.agent_expand_scroll = app.agent_expand_scroll.saturating_add(1);
+                    // Clamping happens in the render function.
+                } else {
+                    app.agent_cursor = app.agent_cursor.saturating_add(1);
+                    // Clamping happens in the render function.
+                }
+            } else {
+                app.log_scroll = app.log_scroll.saturating_sub(3);
+            }
         }
         KeyCode::PageUp => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_add(20);
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded.is_some() {
+                    app.agent_expand_scroll = app.agent_expand_scroll.saturating_sub(10);
+                } else {
+                    app.agent_cursor = app.agent_cursor.saturating_sub(10);
+                }
+            } else {
+                app.log_scroll = app.log_scroll.saturating_add(20);
+            }
         }
         KeyCode::PageDown => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_sub(20);
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded.is_some() {
+                    app.agent_expand_scroll = app.agent_expand_scroll.saturating_add(10);
+                    // Clamping happens in the render function.
+                } else {
+                    app.agent_cursor = app.agent_cursor.saturating_add(10);
+                }
+            } else {
+                app.log_scroll = app.log_scroll.saturating_sub(20);
+            }
+        }
+        KeyCode::Home => {
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded.is_some() {
+                    app.agent_expand_scroll = 0;
+                } else {
+                    app.agent_cursor = 0;
+                }
+            }
         }
         KeyCode::End => {
-            *active_scroll_mut(app) = 0; // follow tail
+            if app.active_pane == ActivePane::AgentOutput {
+                if app.agent_expanded.is_some() {
+                    app.agent_expand_scroll = usize::MAX; // clamped in render
+                } else {
+                    app.agent_cursor = usize::MAX; // clamped in render
+                }
+            } else {
+                app.log_scroll = 0; // follow tail
+            }
         }
         _ => {}
-    }
-}
-
-/// Returns a mutable reference to the scroll offset of the active pane.
-fn active_scroll_mut(app: &mut App) -> &mut usize {
-    match app.active_pane {
-        ActivePane::Log => &mut app.log_scroll,
-        ActivePane::AgentOutput => &mut app.agent_scroll,
     }
 }
 
@@ -272,23 +331,19 @@ fn handle_free_text_key(
         // Pass through navigation keys so the user can scroll and
         // switch panes while typing.
         KeyCode::Up => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_add(3);
+            app.log_scroll = app.log_scroll.saturating_add(3);
         }
         KeyCode::Down => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_sub(3);
+            app.log_scroll = app.log_scroll.saturating_sub(3);
         }
         KeyCode::PageUp => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_add(20);
+            app.log_scroll = app.log_scroll.saturating_add(20);
         }
         KeyCode::PageDown => {
-            let scroll = active_scroll_mut(app);
-            *scroll = scroll.saturating_sub(20);
+            app.log_scroll = app.log_scroll.saturating_sub(20);
         }
         KeyCode::End => {
-            *active_scroll_mut(app) = 0;
+            app.log_scroll = 0;
         }
         KeyCode::Tab | KeyCode::BackTab => {
             if app.show_logs {

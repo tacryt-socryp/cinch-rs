@@ -386,35 +386,31 @@ impl ToolSet {
         // ReadFile, EditFile, and WriteFile.
         let tracker = Arc::new(ReadTracker::new());
 
-        self.with(
-            ReadFile::new(workdir.clone())
-                .max_result_bytes(max)
-                .with_tracker(tracker.clone()),
-        )
-        .with(ListDir::new(workdir.clone()))
-        .with(
-            Grep::new(workdir.clone())
-                .max_matches(config.grep_max_matches)
-                .max_result_bytes(max),
-        )
-        .with(
-            FindFiles::new(workdir.clone())
-                .max_results(config.find_max_results)
-                .max_result_bytes(max),
-        )
-        .with(
-            Shell::new(workdir.clone())
-                .blocked_commands(config.shell_blocked_commands)
-                .max_result_bytes(max),
-        )
-        .with_if(
-            std::env::var("BRAVE_SEARCH_KEY").is_ok(),
-            WebSearch::new().max_result_bytes(max),
-        )
-        .with(EditFile::new(workdir.clone(), tracker.clone()))
-        .with(WriteFile::new(workdir, tracker))
-        .with(ThinkTool)
-        .with(TodoTool::new())
+        self.with(ReadFile::new(workdir.clone()).with_tracker(tracker.clone()))
+            .with(ListDir::new(workdir.clone()))
+            .with(
+                Grep::new(workdir.clone())
+                    .max_matches(config.grep_max_matches)
+                    .max_result_bytes(max),
+            )
+            .with(
+                FindFiles::new(workdir.clone())
+                    .max_results(config.find_max_results)
+                    .max_result_bytes(max),
+            )
+            .with(
+                Shell::new(workdir.clone())
+                    .blocked_commands(config.shell_blocked_commands)
+                    .max_result_bytes(max),
+            )
+            .with_if(
+                std::env::var("BRAVE_SEARCH_KEY").is_ok(),
+                WebSearch::new().max_result_bytes(max),
+            )
+            .with(EditFile::new(workdir.clone(), tracker.clone()))
+            .with(WriteFile::new(workdir, tracker))
+            .with(ThinkTool)
+            .with(TodoTool::new())
     }
 
     /// Whether a tool's results are cacheable (read-only, deterministic).

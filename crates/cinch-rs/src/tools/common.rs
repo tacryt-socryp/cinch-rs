@@ -60,14 +60,8 @@ use std::sync::Arc;
 /// Typed arguments for `read_file`.
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
-    /// File path relative to repo root (e.g. 'docs/readme.md').
+    /// File path relative to repo root (e.g. 'src/main.rs').
     pub path: String,
-    /// Starting line number (1-indexed). Default: 1.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Maximum number of lines to return. Default: 2000.
-    #[serde(default)]
-    pub limit: Option<u32>,
 }
 
 /// Typed arguments for `list_dir`.
@@ -171,26 +165,22 @@ pub struct WriteFileArgs {
 
 /// Read a file from a working directory.
 ///
-/// Path traversal (`..`) is blocked. Results are truncated to
-/// `max_result_bytes`.
+/// Path traversal (`..`) is blocked. Output is capped at
+/// [`MAX_READ_RESULT_BYTES`].
 pub struct ReadFile {
     workdir: String,
-    max_result_bytes: usize,
     tracker: Option<Arc<ReadTracker>>,
 }
+
+/// Hard cap on read_file output (500 KB).
+const MAX_READ_RESULT_BYTES: usize = 500_000;
 
 impl ReadFile {
     pub fn new(workdir: impl Into<String>) -> Self {
         Self {
             workdir: workdir.into(),
-            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
             tracker: None,
         }
-    }
-
-    pub fn max_result_bytes(mut self, max: usize) -> Self {
-        self.max_result_bytes = max;
-        self
     }
 
     /// Attach a [`ReadTracker`] so successful reads are recorded for
@@ -201,34 +191,25 @@ impl ReadFile {
     }
 }
 
-/// Default line limit for `read_file`.
-const DEFAULT_READ_LINE_LIMIT: u32 = 2000;
-
-/// Maximum characters per line before truncation.
-const MAX_LINE_CHARS: usize = 500;
-
 impl Tool for ReadFile {
     fn definition(&self) -> ToolDef {
         ToolSpec::builder(super::names::READ_FILE)
             .purpose("Read a file with numbered lines")
             .when_to_use(
                 "When you need to read a specific file whose path you already know. \
-                 Returns numbered lines you can reference in edit_file operations",
+                 Returns the full file with numbered lines you can reference in edit_file operations",
             )
             .when_not_to_use(
                 "When searching for a pattern across many files — use grep instead. \
-                 When you need to list files in a directory — use list_dir instead",
+                 When you need to list files in a directory — use list_dir instead. \
+                 For large data files (csv, json, log) — use shell with head, tail, awk, or jq instead",
             )
             .parameters_for::<ReadFileArgs>()
             .example(
                 "read_file(path='src/main.rs')",
                 "L1: use std::fs;\nL2: use std::path::Path;\nL3:\nL4: fn main() {",
             )
-            .example(
-                "read_file(path='src/main.rs', offset=50, limit=20)",
-                "Returns lines 50-69 with L{n}: prefix",
-            )
-            .output_format("Numbered lines: L{n}: {content}. For large files use offset/limit to read specific sections.")
+            .output_format("Numbered lines: L{n}: {content}")
             .disambiguate(
                 "Need to find which files contain a keyword",
                 "grep",
@@ -244,13 +225,14 @@ impl Tool for ReadFile {
 
     fn prompt_guidelines(&self) -> Vec<String> {
         vec![
-            "When reading large files, use offset and limit to paginate rather than reading the entire file.".into(),
+            "read_file returns the entire file. For large data files (csv, json, log, etc.) \
+use shell with head, tail, awk, jq, or wc instead of read_file."
+                .into(),
         ]
     }
 
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
         let workdir = self.workdir.clone();
-        let max = self.max_result_bytes;
         let tracker = self.tracker.clone();
         let arguments = arguments.to_string();
         Box::pin(async move {
@@ -282,45 +264,13 @@ impl Tool for ReadFile {
                         t.record_read(&full_path.to_string_lossy(), &content);
                     }
 
-                    let total_lines = content.lines().count();
-                    let offset = args.offset.unwrap_or(1).max(1) as usize;
-                    let limit = args.limit.unwrap_or(DEFAULT_READ_LINE_LIMIT) as usize;
-
                     // Format with line numbers: L{n}: {content}
                     let mut output = String::new();
-                    for (i, line) in content.lines().enumerate() {
-                        let line_num = i + 1; // 1-indexed
-                        if line_num < offset {
-                            continue;
-                        }
-                        if line_num >= offset + limit {
-                            break;
-                        }
-                        // Truncate long lines.
-                        if line.len() > MAX_LINE_CHARS {
-                            let end = line.floor_char_boundary(MAX_LINE_CHARS);
-                            #[allow(clippy::string_slice)] // end from floor_char_boundary
-                            output.push_str(&format!(
-                                "L{line_num}: {}... [line truncated at {MAX_LINE_CHARS} chars]\n",
-                                &line[..end]
-                            ));
-                        } else {
-                            output.push_str(&format!("L{line_num}: {line}\n"));
-                        }
+                    for (line_num, line) in content.lines().enumerate().map(|(i, l)| (i + 1, l)) {
+                        output.push_str(&format!("L{line_num}: {line}\n"));
                     }
 
-                    // Append truncation notice with actionable next-page values.
-                    if offset + limit <= total_lines {
-                        let next_offset = offset + limit;
-                        let shown_end = (offset + limit - 1).min(total_lines);
-                        output.push_str(&format!(
-                            "[Showing lines {offset}-{shown_end} of {total_lines}. \
-                             Next page: read_file(path='{}', offset={next_offset}, limit={limit})]",
-                            args.path
-                        ));
-                    }
-
-                    truncate_result(output, max)
+                    truncate_result(output, MAX_READ_RESULT_BYTES)
                 }
                 Err(e) => format!("Error reading '{}': {e}", full_path.display()),
             }
@@ -2050,7 +2000,7 @@ mod tests {
         assert!(def.function.description.contains("When NOT to use:"));
     }
 
-    // ── read_file line numbers and offset/limit tests ──────────────
+    // ── read_file tests ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn read_file_output_has_line_numbers() {
@@ -2064,78 +2014,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_offset_skips_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let content = (1..=10)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("test.txt"), &content).unwrap();
-
-        let tool = ReadFile::new(dir.path().to_str().unwrap());
-        let result = tool
-            .execute(r#"{"path": "test.txt", "offset": 3, "limit": 2}"#)
-            .await;
-        assert!(result.contains("L3: line 3"), "got: {result}");
-        assert!(result.contains("L4: line 4"), "got: {result}");
-        assert!(
-            !result.contains("L1:"),
-            "should not contain line 1, got: {result}"
-        );
-        assert!(
-            !result.contains("L5:"),
-            "should not contain line 5, got: {result}"
-        );
-    }
-
-    #[tokio::test]
-    async fn read_file_truncation_notice() {
+    async fn read_file_returns_full_file() {
         let dir = tempfile::tempdir().unwrap();
         let content = (1..=100)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(dir.path().join("test.txt"), &content).unwrap();
+        std::fs::write(dir.path().join("test.rs"), &content).unwrap();
 
         let tool = ReadFile::new(dir.path().to_str().unwrap());
-        let result = tool.execute(r#"{"path": "test.txt", "limit": 5}"#).await;
+        let result = tool.execute(r#"{"path": "test.rs"}"#).await;
         assert!(result.contains("L1: line 1"), "got: {result}");
-        assert!(result.contains("L5: line 5"), "got: {result}");
-        assert!(!result.contains("L6:"), "should not contain line 6");
+        assert!(result.contains("L100: line 100"), "got: {result}");
+        // No pagination notice.
         assert!(
-            result.contains("Showing lines 1-5 of 100"),
-            "expected truncation notice, got: {result}"
-        );
-        assert!(
-            result.contains("offset=6"),
-            "expected actionable next-page hint, got: {result}"
+            !result.contains("Showing lines"),
+            "should not paginate, got: {result}"
         );
     }
 
     #[tokio::test]
-    async fn read_file_long_line_truncated() {
+    async fn read_file_long_lines_not_truncated() {
         let dir = tempfile::tempdir().unwrap();
         let long_line = "x".repeat(600);
-        std::fs::write(dir.path().join("test.txt"), &long_line).unwrap();
+        std::fs::write(dir.path().join("test.rs"), &long_line).unwrap();
 
         let tool = ReadFile::new(dir.path().to_str().unwrap());
-        let result = tool.execute(r#"{"path": "test.txt"}"#).await;
+        let result = tool.execute(r#"{"path": "test.rs"}"#).await;
         assert!(
-            result.contains("[line truncated at 500 chars]"),
-            "expected line truncation, got: {result}"
+            result.contains(&"x".repeat(600)),
+            "long lines should not be truncated, got len: {}",
+            result.len()
         );
     }
 
-    #[tokio::test]
-    async fn read_file_args_schema_has_offset_and_limit() {
+    #[test]
+    fn read_file_args_schema_has_only_path() {
         let schema = crate::json_schema_for::<ReadFileArgs>();
         let props = schema["properties"].as_object().unwrap();
-        assert!(props.contains_key("offset"));
-        assert!(props.contains_key("limit"));
-        // offset and limit should NOT be required.
-        let required = schema["required"].as_array().unwrap();
-        assert!(!required.contains(&serde_json::json!("offset")));
-        assert!(!required.contains(&serde_json::json!("limit")));
+        assert!(props.contains_key("path"));
+        assert!(!props.contains_key("offset"));
+        assert!(!props.contains_key("limit"));
     }
 
     // ── grep mode tests ────────────────────────────────────────────

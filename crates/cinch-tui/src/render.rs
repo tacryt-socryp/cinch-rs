@@ -389,6 +389,115 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &[cinch_rs::ui::LogLine], ap
 
 // ── Agent Output Pane ─────────────────────────────────────────────────
 
+/// Maximum lines shown per entry in the collapsed (non-expanded) preview.
+const PREVIEW_LINES: usize = 4;
+
+/// Extract the full displayable content from an agent entry.
+fn entry_full_content(entry: &AgentEntry) -> &str {
+    match entry {
+        AgentEntry::Text(t) => t.as_str(),
+        AgentEntry::ToolExecuting { arguments, .. } => arguments.as_str(),
+        AgentEntry::ToolResult { result, .. } => result.as_str(),
+        AgentEntry::UserMessage(m) => m.as_str(),
+        AgentEntry::TodoUpdate(c) => c.as_str(),
+    }
+}
+
+/// Count the number of display lines an entry takes in collapsed preview mode.
+fn entry_preview_line_count(entry: &AgentEntry) -> usize {
+    let total = match entry {
+        AgentEntry::Text(t) => t.lines().count().max(1),
+        AgentEntry::ToolExecuting { .. } => 1, // header only
+        AgentEntry::ToolResult { result, .. } => 1 + result.lines().count().max(1), // header + content
+        AgentEntry::UserMessage(m) => m.lines().count().max(1),
+        AgentEntry::TodoUpdate(c) => c.lines().count().max(1),
+    };
+    // Cap at PREVIEW_LINES, plus 1 for "..." if truncated.
+    if total > PREVIEW_LINES {
+        PREVIEW_LINES + 1
+    } else {
+        total
+    }
+}
+
+/// Count the number of display lines an entry takes when fully expanded.
+fn entry_expanded_line_count(entry: &AgentEntry, expand_width: usize) -> usize {
+    let full_content = entry_full_content(entry);
+    let content_lines: usize = full_content
+        .lines()
+        .map(|l| {
+            if l.len() > expand_width {
+                l.len().div_ceil(expand_width)
+            } else {
+                1
+            }
+        })
+        .sum();
+    content_lines + 2 // blank lines around expansion
+}
+
+/// Push indented preview lines (after the header) for multi-line content,
+/// up to `remaining` additional lines. Returns whether content was truncated.
+fn push_preview_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    content_lines: impl Iterator<Item = &'a str>,
+    remaining: usize,
+    total_lines: usize,
+    style: Style,
+) {
+    let indent = "     ";
+    for line in content_lines.take(remaining) {
+        lines.push(Line::from(vec![
+            Span::raw(indent),
+            Span::styled(line, style),
+        ]));
+    }
+    if total_lines > remaining {
+        lines.push(Line::from(Span::styled(
+            format!("{indent}..."),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+}
+
+/// Push the full expanded content with word-wrapping and indentation.
+fn push_expanded_content<'a>(
+    lines: &mut Vec<Line<'a>>,
+    full_content: &'a str,
+    expand_width: usize,
+) {
+    lines.push(Line::from(""));
+    for content_line in full_content.lines() {
+        if content_line.len() > expand_width && expand_width > 0 {
+            let mut remaining = content_line;
+            while !remaining.is_empty() {
+                let end = remaining.floor_char_boundary(expand_width.min(remaining.len()));
+                let end = if end == 0 {
+                    remaining.len().min(1)
+                } else {
+                    end
+                };
+                #[allow(clippy::string_slice)] // end from floor_char_boundary
+                let chunk = &remaining[..end];
+                lines.push(Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(chunk, Style::default().fg(Color::Black)),
+                ]));
+                #[allow(clippy::string_slice)] // end from floor_char_boundary
+                {
+                    remaining = &remaining[end..];
+                }
+            }
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("      "),
+                Span::styled(content_line, Style::default().fg(Color::Black)),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+}
+
 fn render_agent_output(
     frame: &mut Frame,
     area: Rect,
@@ -400,6 +509,9 @@ fn render_agent_output(
     let content_width = area.width.saturating_sub(2) as usize;
     let arg_max = content_width.saturating_sub(16).max(20);
 
+    let entry_count = agent_output.len();
+    let cursor = app.agent_cursor.min(entry_count.saturating_sub(1));
+
     let tool_name_style = Style::default()
         .fg(Color::Blue)
         .add_modifier(Modifier::BOLD);
@@ -409,20 +521,44 @@ fn render_agent_output(
         .fg(Color::Red)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let text_style = Style::default().fg(Color::Black);
+    let dim_style = Style::default()
+        .fg(Color::Black)
+        .add_modifier(Modifier::DIM);
     let streaming_style = Style::default().fg(Color::Magenta);
 
     let mut lines: Vec<Line> = Vec::new();
 
-    for entry in agent_output {
+    for (i, entry) in agent_output.iter().enumerate() {
+        let is_cursor = i == cursor;
+        let marker = if is_cursor { "> " } else { "  " };
+        let row_style = if is_cursor {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
         match entry {
             AgentEntry::Text(text) => {
-                for line in text.lines() {
-                    lines.push(Line::from(Span::styled(line, text_style)));
-                }
+                let total = text.lines().count().max(1);
+                let mut text_lines = text.lines();
+                // First line with marker.
+                let first = text_lines.next().unwrap_or("");
+                lines.push(Line::from(vec![
+                    Span::styled(marker, row_style),
+                    Span::styled(first, text_style),
+                ]));
+                push_preview_lines(
+                    &mut lines,
+                    text_lines,
+                    PREVIEW_LINES - 1,
+                    total - 1,
+                    text_style,
+                );
             }
             AgentEntry::ToolExecuting { name, arguments } => {
                 let args_summary = summarize_args(arguments, arg_max);
                 lines.push(Line::from(vec![
+                    Span::styled(marker, row_style),
                     Span::styled(">> ", tool_name_style),
                     Span::styled(name.as_str(), tool_name_style),
                     Span::styled(format!("  {args_summary}"), tool_args_style),
@@ -433,48 +569,82 @@ fn render_agent_output(
                 result,
                 is_error,
             } => {
-                let preview = result_preview(result, arg_max);
-                if *is_error {
-                    lines.push(Line::from(vec![
-                        Span::styled("<< ", tool_err_style),
-                        Span::styled(name.as_str(), tool_err_style),
-                        Span::styled(format!("  {preview}"), tool_err_style),
-                    ]));
+                let style = if *is_error {
+                    tool_err_style
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::styled("<< ", tool_ok_style),
-                        Span::styled(name.as_str(), tool_ok_style),
-                        Span::styled(
-                            format!("  {preview}"),
-                            Style::default()
-                                .fg(Color::Black)
-                                .add_modifier(Modifier::DIM),
-                        ),
-                    ]));
-                }
+                    tool_ok_style
+                };
+                // Header line with tool name.
+                lines.push(Line::from(vec![
+                    Span::styled(marker, row_style),
+                    Span::styled("<< ", style),
+                    Span::styled(name.as_str(), style),
+                ]));
+                // Preview lines of the result content.
+                let total = result.lines().count().max(1);
+                let content_style = if *is_error { tool_err_style } else { dim_style };
+                push_preview_lines(
+                    &mut lines,
+                    result.lines(),
+                    PREVIEW_LINES - 1,
+                    total,
+                    content_style,
+                );
             }
             AgentEntry::UserMessage(message) => {
                 let user_style = Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD);
+                let total = message.lines().count().max(1);
+                let mut msg_lines = message.lines();
+                let first = msg_lines.next().unwrap_or("");
                 lines.push(Line::from(vec![
+                    Span::styled(marker, row_style),
                     Span::styled("> ", user_style),
-                    Span::styled(message.as_str(), user_style),
+                    Span::styled(first, user_style),
                 ]));
+                push_preview_lines(
+                    &mut lines,
+                    msg_lines,
+                    PREVIEW_LINES - 1,
+                    total - 1,
+                    user_style,
+                );
             }
             AgentEntry::TodoUpdate(content) => {
                 let header_style = Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD);
                 let item_style = Style::default().fg(Color::Black);
-                for line in content.lines() {
-                    if line.starts_with("Todo list:") {
-                        lines.push(Line::from(Span::styled(line, header_style)));
+                let total = content.lines().count().max(1);
+                let mut content_lines = content.lines();
+                // First line with marker.
+                if let Some(first) = content_lines.next() {
+                    let style = if first.starts_with("Todo list:") {
+                        header_style
                     } else {
-                        lines.push(Line::from(Span::styled(line, item_style)));
-                    }
+                        item_style
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, row_style),
+                        Span::styled(first, style),
+                    ]));
                 }
+                push_preview_lines(
+                    &mut lines,
+                    content_lines,
+                    PREVIEW_LINES - 1,
+                    total - 1,
+                    item_style,
+                );
             }
+        }
+
+        // If this entry is expanded, show full content with word-wrapping.
+        if app.agent_expanded == Some(i) {
+            let full_content = entry_full_content(entry);
+            let expand_width = content_width.saturating_sub(6);
+            push_expanded_content(&mut lines, full_content, expand_width);
         }
     }
 
@@ -485,13 +655,43 @@ fn render_agent_output(
         }
     }
 
-    let total = lines.len();
-    let scroll = if app.agent_scroll == 0 {
-        total.saturating_sub(inner_height)
+    // ── Scroll computation ──
+    // Find the line index where the cursor row starts, then auto-scroll
+    // to keep the cursor visible.
+    let mut cursor_line_start = 0usize;
+    let mut cursor_line_count = 1usize;
+    {
+        let expand_width = content_width.saturating_sub(6).max(1);
+        let mut line_idx = 0usize;
+        for (i, entry) in agent_output.iter().enumerate() {
+            let preview_lines = entry_preview_line_count(entry);
+            if i == cursor {
+                cursor_line_start = line_idx;
+                cursor_line_count = preview_lines;
+                if app.agent_expanded == Some(i) {
+                    cursor_line_count += entry_expanded_line_count(entry, expand_width);
+                }
+                break;
+            }
+            line_idx += preview_lines;
+            if app.agent_expanded == Some(i) {
+                line_idx += entry_expanded_line_count(entry, expand_width);
+            }
+        }
+    }
+
+    // Scroll: when expanded, scroll within the expanded content;
+    // otherwise auto-scroll to keep the cursor row visible.
+    let scroll = if app.agent_expanded.is_some() {
+        // Offset from the cursor's summary line into the expanded content.
+        let max_scroll = (cursor_line_start + cursor_line_count).saturating_sub(inner_height);
+        (cursor_line_start + app.agent_expand_scroll).min(max_scroll)
+    } else if cursor_line_start + cursor_line_count > app.agent_scroll + inner_height {
+        (cursor_line_start + cursor_line_count).saturating_sub(inner_height)
+    } else if cursor_line_start < app.agent_scroll {
+        cursor_line_start
     } else {
-        total
-            .saturating_sub(inner_height)
-            .saturating_sub(app.agent_scroll)
+        app.agent_scroll
     };
 
     let border_color = if app.active_pane == ActivePane::AgentOutput {
@@ -1048,10 +1248,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             let hint = if let Some(ref msg) = app.status_message {
                 msg.clone()
             } else if app.agent_busy {
-                "[Esc] interrupt  [q] quit  [c] context  [,] logs  [Tab] pane  [Up/Down] scroll"
+                "[Esc] interrupt  [q] quit  [c] context  [Enter] expand  [,] logs  [Tab] pane  [Up/Down] scroll"
                     .to_string()
             } else {
-                "[q] quit  [c] context  [,] logs  [Tab] pane  [Up/Down] scroll".to_string()
+                "[q] quit  [c] context  [Enter] expand  [,] logs  [Tab] pane  [Up/Down] scroll"
+                    .to_string()
             };
             let style = if app.agent_busy {
                 Style::default().fg(Color::Magenta)

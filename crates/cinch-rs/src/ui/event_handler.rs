@@ -75,7 +75,7 @@ impl EventHandler for UiEventHandler {
                 }
             }
             HarnessEvent::Reasoning(text) => {
-                push_agent_text(&self.state, &format!("[reasoning] {text}"));
+                push_agent_text(&self.state, text);
             }
             HarnessEvent::PhaseTransition { from, to } => {
                 push_agent_text(&self.state, &format!("[phase] {from:?} \u{2192} {to:?}"));

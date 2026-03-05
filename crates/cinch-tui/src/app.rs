@@ -50,6 +50,12 @@ pub(crate) struct App {
     pub(crate) context_cursor: usize,
     /// Index of the expanded message (shown in full), or `None`.
     pub(crate) context_expanded: Option<usize>,
+    /// Currently highlighted entry index in agent output pane.
+    pub(crate) agent_cursor: usize,
+    /// Index of the expanded agent entry (shown in full), or `None`.
+    pub(crate) agent_expanded: Option<usize>,
+    /// Scroll offset (lines from top of expanded content) when an agent entry is expanded.
+    pub(crate) agent_expand_scroll: usize,
 }
 
 impl App {
@@ -69,6 +75,9 @@ impl App {
             context_scroll: 0,
             context_cursor: 0,
             context_expanded: None,
+            agent_cursor: 0,
+            agent_expanded: None,
+            agent_expand_scroll: 0,
         }
     }
 }
