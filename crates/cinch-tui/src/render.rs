@@ -130,7 +130,7 @@ fn own_spans(spans: Vec<Span<'_>>) -> Vec<Span<'static>> {
 pub(crate) fn render(
     frame: &mut Frame,
     state: &Arc<Mutex<UiState>>,
-    app: &App,
+    app: &mut App,
     ext_renderer: &dyn TuiExtensionRenderer,
 ) {
     let area = frame.area();
@@ -503,14 +503,15 @@ fn render_agent_output(
     area: Rect,
     agent_output: &[AgentEntry],
     streaming_buffer: &str,
-    app: &App,
+    app: &mut App,
 ) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let content_width = area.width.saturating_sub(2) as usize;
     let arg_max = content_width.saturating_sub(16).max(20);
 
     let entry_count = agent_output.len();
-    let cursor = app.agent_cursor.min(entry_count.saturating_sub(1));
+    app.agent_cursor = app.agent_cursor.min(entry_count.saturating_sub(1));
+    let cursor = app.agent_cursor;
 
     let tool_name_style = Style::default()
         .fg(Color::Blue)
@@ -693,6 +694,7 @@ fn render_agent_output(
     } else {
         app.agent_scroll
     };
+    app.agent_scroll = scroll;
 
     let border_color = if app.active_pane == ActivePane::AgentOutput {
         Color::Blue

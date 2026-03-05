@@ -196,7 +196,7 @@ pub fn run_tui(state: Arc<Mutex<UiState>>, config: &TuiConfig) -> io::Result<()>
 
         // Render (takes its own snapshot lock internally).
         terminal.draw(|frame| {
-            render(frame, &state, &app, config.extension_renderer.as_ref());
+            render(frame, &state, &mut app, config.extension_renderer.as_ref());
         })?;
 
         // Poll for input events (100ms timeout for responsive rendering).
