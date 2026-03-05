@@ -1268,14 +1268,18 @@ fn render_context_view(frame: &mut Frame, area: Rect, snap: &RenderSnapshot, app
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let (title, style) = match app.input_mode {
+        InputMode::Normal if app.input_focused => (
+            " [Enter] send  [Esc] cancel ".to_string(),
+            Style::default().fg(Color::Blue),
+        ),
         InputMode::Normal => {
             let hint = if let Some(ref msg) = app.status_message {
                 msg.clone()
             } else if app.agent_busy {
-                "[Esc] interrupt  [q] quit  [c] context  [Enter] expand  [,] logs  [Tab] pane  [Up/Down] scroll"
+                "[Esc] interrupt  [i] message  [q] quit  [c] context  [Enter] expand  [,] logs  [Tab] pane  [Up/Down] scroll"
                     .to_string()
             } else {
-                "[q] quit  [c] context  [Enter] expand  [,] logs  [Tab] pane  [Up/Down] scroll"
+                "[i] message  [q] quit  [c] context  [Enter] expand  [,] logs  [Tab] pane  [Up/Down] scroll"
                     .to_string()
             };
             let style = if app.agent_busy {
@@ -1312,6 +1316,9 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let input_text = match app.input_mode {
+        InputMode::Normal if app.input_focused => {
+            format!("> {}\u{2588}", app.input_buffer)
+        }
         InputMode::Normal | InputMode::QuestionSelect | InputMode::ContextView => String::new(),
         InputMode::QuestionEdit | InputMode::FreeText => {
             format!("> {}\u{2588}", app.input_buffer)

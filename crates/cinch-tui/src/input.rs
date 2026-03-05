@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cinch_rs::ui::{QuestionResponse, UiState};
+use cinch_rs::ui::{QuestionResponse, UiState, push_pending_message, push_user_message};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::app::{ActivePane, App, InputMode};
@@ -28,8 +28,47 @@ pub(crate) fn handle_key_event(
 }
 
 fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc<Mutex<UiState>>) {
+    // When input is focused, typing goes to the buffer; navigation keys
+    // still fall through to normal handling below.
+    if app.input_focused {
+        match key.code {
+            KeyCode::Char(c) => {
+                app.input_buffer.push(c);
+                return;
+            }
+            KeyCode::Backspace => {
+                app.input_buffer.pop();
+                return;
+            }
+            KeyCode::Enter => {
+                let text = app.input_buffer.trim().to_string();
+                if !text.is_empty() {
+                    push_pending_message(state, text.clone());
+                    push_user_message(state, &text);
+                    app.input_buffer.clear();
+                    app.input_focused = false;
+                    // Jump to tail so the user sees their message.
+                    app.agent_cursor = usize::MAX;
+                    app.agent_expanded = None;
+                }
+                return;
+            }
+            KeyCode::Esc => {
+                app.input_buffer.clear();
+                app.input_focused = false;
+                return;
+            }
+            _ => {
+                // Fall through to normal navigation handling.
+            }
+        }
+    }
+
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('i') => {
+            app.input_focused = true;
+        }
         KeyCode::Esc => {
             if app.agent_expanded.is_some() {
                 // Close expanded agent entry first.

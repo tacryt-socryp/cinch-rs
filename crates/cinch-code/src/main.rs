@@ -122,6 +122,21 @@ async fn get_user_input(ui_state: &Arc<Mutex<UiState>>) -> Option<String> {
         if ui_state.lock().unwrap().quit_requested {
             return None;
         }
+        // Check if a message was sent via the persistent input bar.
+        let pending = drain_pending_messages(ui_state);
+        if let Some(first) = pending.into_iter().next() {
+            // Cancel the active question since we have input now.
+            {
+                let mut s = ui_state.lock().unwrap();
+                if let Some(ref mut aq) = s.active_question {
+                    aq.response = Some(QuestionResponse::Skipped);
+                    aq.done = true;
+                }
+            }
+            // Drain the question so poll_question doesn't interfere.
+            let _ = poll_question(ui_state);
+            return Some(first);
+        }
         if let Some(response) = poll_question(ui_state) {
             return match response {
                 QuestionResponse::FreeText(text) => Some(text),
@@ -371,6 +386,16 @@ async fn main() {
         // Check quit again after harness completes.
         if ui_state.lock().unwrap().quit_requested {
             break;
+        }
+
+        // Drain any messages sent via the persistent input bar while the
+        // agent was running. If present, skip the blocking input prompt.
+        let pending = drain_pending_messages(&ui_state);
+        if !pending.is_empty() {
+            for msg in pending {
+                messages.push(Message::user(&msg));
+            }
+            continue;
         }
 
         // Get next user input.

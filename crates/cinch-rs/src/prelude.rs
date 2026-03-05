@@ -46,7 +46,7 @@ pub use crate::ui::event_handler::UiEventHandler;
 pub use crate::ui::tracing::UiTracingLayer;
 pub use crate::ui::{
     AgentEntry, LogLevel, LogLine, NoExtension, QuestionChoice, QuestionResponse, UiExtension,
-    UiState, UserQuestion, ask_question, clear_next_cycle, poll_question, push_agent_text,
-    push_agent_text_delta, push_tool_executing, push_tool_result, push_user_message,
-    set_next_cycle, update_phase, update_round,
+    UiState, UserQuestion, ask_question, clear_next_cycle, drain_pending_messages, poll_question,
+    push_agent_text, push_agent_text_delta, push_pending_message, push_tool_executing,
+    push_tool_result, push_user_message, set_next_cycle, update_phase, update_round,
 };

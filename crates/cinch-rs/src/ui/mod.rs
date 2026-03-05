@@ -211,6 +211,9 @@ pub struct UiState {
     /// Latest snapshot of context window contents, updated per round.
     pub context_snapshot: Option<ContextSnapshot>,
 
+    // ── Pending user messages (sent from the input bar) ──
+    pub pending_messages: Vec<String>,
+
     // ── Domain-specific extension slot ──
     pub extensions: Box<dyn UiExtension>,
 }
@@ -243,6 +246,7 @@ impl Default for UiState {
             active_question: None,
             next_cycle_at: None,
             context_snapshot: None,
+            pending_messages: Vec::new(),
             extensions: Box::new(NoExtension),
         }
     }
@@ -368,6 +372,20 @@ pub fn set_next_cycle(state: &Arc<Mutex<UiState>>, duration: Duration) {
 /// Clear the next-cycle countdown (cycle is starting).
 pub fn clear_next_cycle(state: &Arc<Mutex<UiState>>) {
     with_state!(state, |s| { s.next_cycle_at = None });
+}
+
+/// Push a message into the pending queue (sent from the TUI input bar).
+pub fn push_pending_message(state: &Arc<Mutex<UiState>>, message: String) {
+    with_state!(state, |s| { s.pending_messages.push(message) });
+}
+
+/// Drain all pending messages from the queue.
+pub fn drain_pending_messages(state: &Arc<Mutex<UiState>>) -> Vec<String> {
+    if let Ok(mut s) = state.lock() {
+        std::mem::take(&mut s.pending_messages)
+    } else {
+        Vec::new()
+    }
 }
 
 /// Update the context window snapshot for visualization.

@@ -63,6 +63,8 @@ pub(crate) struct App {
     pub(crate) expand_line_cache: HashMap<(usize, usize), usize>,
     /// Entry count when the cache was last valid.
     pub(crate) expand_cache_entry_count: usize,
+    /// Whether the persistent input bar is focused for typing.
+    pub(crate) input_focused: bool,
 }
 
 impl App {
@@ -87,6 +89,7 @@ impl App {
             agent_expand_scroll: 0,
             expand_line_cache: HashMap::new(),
             expand_cache_entry_count: 0,
+            input_focused: false,
         }
     }
 }
