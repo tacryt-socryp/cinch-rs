@@ -1265,21 +1265,83 @@ async fn handle_plan_submission(
         .position(|c| PlanExecuteConfig::is_plan_submission(&c.function.name));
 
     if let Some(idx) = submit_idx {
-        let plan_summary = completion.tool_calls[idx].function.arguments.clone();
-        let summary_text: String = serde_json::from_str::<serde_json::Value>(&plan_summary)
-            .ok()
-            .and_then(|v| v.get("summary").and_then(|s| s.as_str()).map(String::from))
-            .unwrap_or_else(|| plan_summary.clone());
+        let plan_args = completion.tool_calls[idx].function.arguments.clone();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&plan_args).unwrap_or(serde_json::Value::Null);
+        let summary_text = parsed
+            .get("summary")
+            .and_then(|s| s.as_str())
+            .unwrap_or(&plan_args)
+            .to_string();
+        let files_text = parsed
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let approach_text = parsed
+            .get("approach")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let verification_text = parsed
+            .get("verification")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Build a combined plan summary for the execution prompt.
+        let mut full_plan = summary_text.clone();
+        if !files_text.is_empty() {
+            full_plan.push_str(&format!("\n\nFiles: {files_text}"));
+        }
+        if !approach_text.is_empty() {
+            full_plan.push_str(&format!("\n\nApproach: {approach_text}"));
+        }
+        if !verification_text.is_empty() {
+            full_plan.push_str(&format!("\n\nVerification: {verification_text}"));
+        }
+
+        // Fire PlanSubmitted event — the handler can approve (None/Approve)
+        // or reject (Deny(feedback)) the plan.
+        let response = event_handler.on_event(&HarnessEvent::PlanSubmitted {
+            summary: &full_plan,
+        });
 
         layout.push_message(Message::assistant_tool_calls(completion.tool_calls.clone()));
 
+        if let Some(EventResponse::Deny(feedback)) = response {
+            // Plan rejected — stay in Planning phase, send feedback to agent.
+            for call in &completion.tool_calls {
+                if PlanExecuteConfig::is_plan_submission(&call.function.name) {
+                    layout.push_message(Message::tool_result(
+                        &call.id,
+                        format!(
+                            "Plan was not approved. The user provided the following feedback:\n\n{feedback}\n\nRevise your plan and call submit_plan again."
+                        ),
+                    ));
+                } else {
+                    let result = tools
+                        .execute(&call.function.name, &call.function.arguments)
+                        .await;
+                    layout.push_message(Message::tool_result(&call.id, result));
+                }
+            }
+
+            // Stay in Planning — return None so the caller doesn't transition.
+            return None;
+        }
+
+        // Plan approved — transition to execution.
         for call in &completion.tool_calls {
             if PlanExecuteConfig::is_plan_submission(&call.function.name) {
                 layout.push_message(Message::tool_result(
                     &call.id,
-                    format!(
-                        "Plan accepted. Transitioning to execution phase.\n\nPlan summary: {summary_text}"
-                    ),
+                    format!("Plan accepted. Transitioning to execution phase.\n\n{full_plan}"),
                 ));
             } else {
                 let result = tools
@@ -1289,15 +1351,18 @@ async fn handle_plan_submission(
             }
         }
 
-        event_handler.on_event(&HarnessEvent::PlanSubmitted {
-            summary: &summary_text,
-        });
         event_handler.on_event(&HarnessEvent::PhaseTransition {
             from: &Phase::Planning,
             to: &Phase::Executing,
         });
 
-        layout.push_message(Message::user(&config.plan_execute.config.execution_prompt));
+        // Interpolate the plan summary into the execution prompt.
+        let exec_prompt = config
+            .plan_execute
+            .config
+            .execution_prompt
+            .replace("{plan_summary}", &full_plan);
+        layout.push_message(Message::user(&exec_prompt));
 
         return Some(PlanTransition {
             should_continue: true,

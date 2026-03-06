@@ -99,6 +99,11 @@ pub enum HarnessEvent<'a> {
     /// The agent transitioned from the planning phase to the execution phase.
     PhaseTransition { from: &'a Phase, to: &'a Phase },
     /// The agent submitted a plan (called `submit_plan` during planning).
+    ///
+    /// Return `Some(EventResponse::Deny(feedback))` to reject the plan and
+    /// send the feedback to the agent for revision. Return `None` or
+    /// `Some(EventResponse::Approve)` to accept the plan and transition
+    /// to the execution phase.
     PlanSubmitted { summary: &'a str },
     /// MEMORY.md was consolidated (post-session, over the line limit).
     MemoryConsolidated {

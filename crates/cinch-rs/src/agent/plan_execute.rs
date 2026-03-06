@@ -65,31 +65,64 @@ impl Default for PlanExecuteConfig {
 
 /// Default planning phase prompt.
 ///
-/// Teaches the agent the purpose of the phase and how to use the available
-/// tools to orient itself before acting. Emphasizes `think` and `todo` as
-/// free reasoning tools and explains when to call `submit_plan`.
+/// Guides the agent through structured exploration and plan formulation.
+/// Emphasizes concrete, file-level planning over vague summaries.
 const DEFAULT_PLANNING_PROMPT: &str = "\
-You are in the ORIENT & PLAN phase. Your goal is to understand the situation \
-before taking action.
+You are in the PLAN phase. Mutation tools (write, edit, etc.) are disabled \
+until you submit a plan. Your goal is to understand the problem and produce a \
+concrete, actionable plan before making any changes.
 
-Use your exploration tools (read_file, grep, list_dir, shell, etc.) to gather \
-the information you need. Follow threads — if something looks interesting, \
-investigate further.
+## Step 1 — Understand the request
+Restate the user's goal in your own words so you're clear on what success \
+looks like.
 
-When you've explored enough, use the `think` tool (free — doesn't consume a \
-round) to reason about what you've found and decide on your approach. Then use \
-the `todo` tool (also free) to outline your plan as a checklist.
+## Step 2 — Explore the codebase
+Use read_file, grep, list_dir, and find_files to understand the relevant code. \
+Make multiple tool calls in parallel when exploring independent areas. Follow \
+references — if a function delegates to another module, read that module too.
 
-When you have a clear understanding of the problem and a concrete plan, call \
-`submit_plan` to transition to execution. Don't submit until you're confident \
-in your approach — but don't over-plan either. A few clear steps are better \
-than an exhaustive specification.";
+## Step 3 — Identify scope
+Determine exactly which files and functions need to change. Look for existing \
+patterns, utilities, and conventions you should reuse rather than reinvent.
+
+## Step 4 — Design your approach
+Use `think` (free — doesn't consume a round) to reason about tradeoffs. Then \
+use `todo` (also free) to create a checklist. Each todo item should be specific \
+enough to execute without further exploration, e.g.:
+  - \"Add `sort` field to `ProviderPreferences` in src/lib.rs\"
+  - \"Update `build_request()` in src/agent/execution.rs to pass provider\"
+
+Avoid vague items like \"improve error handling\" or \"update the code\".
+
+## Step 5 — Verification plan
+Decide how you'll verify the changes work. This could include:
+  - Running existing tests (`cargo test`, `npm test`, etc.)
+  - Running linters or formatters
+  - Manual verification steps
+
+## Step 6 — Submit
+Call `submit_plan` with a summary, the list of files you'll modify, your \
+approach, and your verification plan. Don't submit until your plan references \
+specific files and changes — but don't over-plan either. A few concrete steps \
+are better than an exhaustive specification.";
 
 /// Default execution phase prompt.
+///
+/// Uses `{plan_summary}` as a placeholder that gets replaced with the actual
+/// plan summary at transition time.
 const DEFAULT_EXECUTION_PROMPT: &str = "\
-You are now in the EXECUTE phase. All tools are available. Follow the plan you \
-created, adapting as needed if you discover something unexpected. Mark todo \
-items as in-progress when you start them and complete when done.";
+You are now in the EXECUTE phase. All tools are available.
+
+## Your plan
+{plan_summary}
+
+## Guidelines
+- Work through your todo list in order. Mark items in-progress when you start \
+them and complete when done.
+- Read each file before editing it — don't assume its contents from planning.
+- If you discover something unexpected, adapt your plan rather than blindly \
+following it. Add new todo items if needed.
+- After completing all changes, verify by running any relevant tests or checks.";
 
 impl PlanExecuteConfig {
     /// Filter tool definitions to only include planning-phase tools.
@@ -112,19 +145,31 @@ impl PlanExecuteConfig {
         ToolDef::new(
             "submit_plan",
             "Signal that you've finished planning and are ready to execute. \
-             Call this when you understand the problem, have gathered the \
-             information you need, and have outlined your approach (ideally \
-             in the todo list). After calling this, all tools become available \
-             and you should follow your plan.",
+             Call this after you've explored the codebase, created a todo \
+             checklist, and are confident in your approach. After calling this, \
+             all tools (including write/edit) become available.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
                         "description": "Brief summary of what you plan to do and why"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of file paths that will be modified or created"
+                    },
+                    "approach": {
+                        "type": "string",
+                        "description": "Key design decisions: patterns to reuse, tradeoffs considered, why this approach over alternatives"
+                    },
+                    "verification": {
+                        "type": "string",
+                        "description": "How to verify the changes work: tests to run, commands to execute, manual checks to perform"
                     }
                 },
-                "required": ["summary"]
+                "required": ["summary", "files", "verification"]
             }),
         )
     }
