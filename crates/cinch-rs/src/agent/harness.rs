@@ -486,7 +486,6 @@ impl<'a> Harness<'a> {
                     self.tools,
                     &completion,
                     &mut layout,
-                    acc.rounds_used,
                     self.event_handler,
                     self.ui_state.as_ref(),
                 )
@@ -1204,7 +1203,6 @@ async fn handle_plan_submission(
     tools: &ToolSet,
     completion: &crate::ChatCompletion,
     layout: &mut ContextLayout,
-    rounds_used: u32,
     event_handler: &dyn EventHandler,
     ui_state: Option<&Arc<Mutex<UiState>>>,
 ) -> PlanSubmissionResult {
@@ -1361,22 +1359,6 @@ async fn handle_plan_submission(
 
         return PlanSubmissionResult::Approved {
             should_continue: true,
-        };
-    }
-
-    // Check if planning phase exceeded its round budget.
-    if rounds_used >= config.plan_execute.config.max_planning_rounds {
-        info!(
-            "Planning phase hit round limit ({}). Auto-transitioning to execution.",
-            config.plan_execute.config.max_planning_rounds
-        );
-        event_handler.on_event(&HarnessEvent::PhaseTransition {
-            from: &Phase::Planning,
-            to: &Phase::Executing,
-        });
-        layout.push_message(Message::user(&config.plan_execute.config.execution_prompt));
-        return PlanSubmissionResult::Approved {
-            should_continue: false,
         };
     }
 

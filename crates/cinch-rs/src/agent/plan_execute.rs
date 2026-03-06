@@ -26,10 +26,6 @@ pub enum Phase {
 /// Configuration for plan-then-execute workflow.
 #[derive(Debug, Clone)]
 pub struct PlanExecuteConfig {
-    /// Maximum rounds for the planning phase. After this many rounds, the
-    /// harness auto-transitions to execution even without `submit_plan`.
-    /// Default: 10.
-    pub max_planning_rounds: u32,
     /// Tool names allowed during planning. Tools not in this list are hidden
     /// from the LLM during the planning phase. Any name listed here that
     /// doesn't correspond to a registered tool is silently ignored.
@@ -43,7 +39,6 @@ pub struct PlanExecuteConfig {
 impl Default for PlanExecuteConfig {
     fn default() -> Self {
         Self {
-            max_planning_rounds: 10,
             planning_tools: vec![
                 // Reasoning tools (free — don't consume rounds).
                 crate::tools::names::THINK.into(),
@@ -227,11 +222,5 @@ mod tests {
     fn phase_equality() {
         assert_eq!(Phase::Planning, Phase::Planning);
         assert_ne!(Phase::Planning, Phase::Executing);
-    }
-
-    #[test]
-    fn default_planning_rounds() {
-        let config = PlanExecuteConfig::default();
-        assert_eq!(config.max_planning_rounds, 10);
     }
 }

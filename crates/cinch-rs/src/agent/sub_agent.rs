@@ -291,18 +291,13 @@ fn planner_system_prompt(name: &str) -> String {
 
 /// Build a plan-execute config that stays in planning mode for the entire run.
 /// Used by Explore and Planner types to restrict tools to read-only.
-fn plan_execute_read_only(max_rounds: u32) -> crate::agent::config::HarnessPlanExecuteConfig {
+fn plan_execute_read_only() -> crate::agent::config::HarnessPlanExecuteConfig {
     use crate::agent::config::Toggle;
     use crate::agent::plan_execute::PlanExecuteConfig;
 
     Toggle {
         enabled: true,
-        config: PlanExecuteConfig {
-            // Set max_planning_rounds equal to the full round budget so the
-            // agent never transitions to execution — it stays read-only.
-            max_planning_rounds: max_rounds,
-            ..PlanExecuteConfig::default()
-        },
+        config: PlanExecuteConfig::default(),
     }
 }
 
@@ -329,7 +324,7 @@ fn resolve_config(args: &DelegateSubAgentArgs, parent_model: &str) -> ResolvedCo
             ResolvedConfig {
                 model: args.model.clone().unwrap_or_else(|| parent_model.into()),
                 max_rounds: rounds,
-                plan_execute: plan_execute_read_only(rounds),
+                plan_execute: plan_execute_read_only(),
                 system_prompt: explore_system_prompt(&args.name),
             }
         }
@@ -351,7 +346,7 @@ fn resolve_config(args: &DelegateSubAgentArgs, parent_model: &str) -> ResolvedCo
             ResolvedConfig {
                 model: args.model.clone().unwrap_or_else(|| parent_model.into()),
                 max_rounds: rounds,
-                plan_execute: plan_execute_read_only(rounds),
+                plan_execute: plan_execute_read_only(),
                 system_prompt: planner_system_prompt(&args.name),
             }
         }
@@ -1070,9 +1065,8 @@ mod tests {
 
     #[test]
     fn plan_execute_read_only_stays_in_planning() {
-        let pe = plan_execute_read_only(15);
+        let pe = plan_execute_read_only();
         assert!(pe.enabled);
-        assert_eq!(pe.config.max_planning_rounds, 15);
     }
 
     // ── resolve_config tests ────────────────────────────────────────
