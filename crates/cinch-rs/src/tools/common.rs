@@ -469,9 +469,10 @@ impl Grep {
 impl Tool for Grep {
     fn definition(&self) -> ToolDef {
         ToolSpec::builder(super::names::GREP)
-            .purpose("Search for a regex pattern in file contents")
+            .purpose("Search for a regex pattern in file contents using ripgrep")
             .when_to_use(
                 "When you need to find text matching a pattern across multiple files. \
+                 Respects .gitignore automatically. \
                  Defaults to returning file paths only (compact). Use mode='content' \
                  to see matching lines when needed",
             )
@@ -512,7 +513,6 @@ impl Tool for Grep {
 
     fn execute(&self, arguments: &str) -> ToolFuture<'_> {
         let workdir = self.workdir.clone();
-        let max_matches = self.max_matches;
         let max_result_bytes = self.max_result_bytes;
         let arguments = arguments.to_string();
         Box::pin(async move {
@@ -528,19 +528,17 @@ impl Tool for Grep {
 
             let mode = args.mode.as_deref().unwrap_or("files");
 
+            // Use ripgrep (rg) — fast, respects .gitignore, skips .git/target.
             let mut cmd_args: Vec<String> = vec![
-                "-r".to_string(),
                 "--color=never".to_string(),
-                format!("--max-count={max_matches}"),
+                "--no-heading".to_string(),
             ];
 
             match mode {
                 "files" => {
-                    // Files-only mode: return paths only (most token-efficient).
                     cmd_args.push("-l".to_string());
                 }
                 "content" => {
-                    // Content mode: return matching lines with line numbers.
                     cmd_args.push("-n".to_string());
                     if let Some(ctx) = args.context_lines
                         && ctx > 0
@@ -549,7 +547,6 @@ impl Tool for Grep {
                     }
                 }
                 "count" => {
-                    // Count mode: return match counts per file.
                     cmd_args.push("-c".to_string());
                 }
                 _ => {
@@ -565,15 +562,19 @@ impl Tool for Grep {
             }
 
             if let Some(glob) = &args.glob {
-                cmd_args.push(format!("--include={glob}"));
+                cmd_args.push(format!("--glob={glob}"));
             }
 
+            // Also skip .agents directory (not in .gitignore but not useful).
+            cmd_args.push("--glob=!.agents".to_string());
+
+            cmd_args.push("--".to_string());
             cmd_args.push(args.pattern);
             cmd_args.push(full_path.to_string_lossy().to_string());
 
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-            // grep returns exit code 1 for "no matches" — not an error.
-            let result = run_command("grep", &arg_refs, &[1]).await;
+            // rg returns exit code 1 for "no matches" — not an error.
+            let result = run_command("rg", &arg_refs, &[1]).await;
 
             // For count mode, strip lines with :0 (no matches in that file).
             let result = if mode == "count" {
@@ -1004,6 +1005,18 @@ fn format_brave_results(body: &serde_json::Value) -> String {
 
 // ── EditFile ──────────────────────────────────────────────────────
 
+/// Normalize whitespace for fuzzy matching.
+///
+/// - Converts CRLF to LF
+/// - Trims trailing whitespace from each line
+fn normalize_whitespace(s: &str) -> String {
+    s.replace("\r\n", "\n")
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Edit a file by replacing an exact string.
 ///
 /// Requires the file to have been read with `read_file` first
@@ -1093,13 +1106,41 @@ impl Tool for EditFile {
 
             let replace_all = args.replace_all.unwrap_or(false);
 
-            // Count occurrences.
+            // First try exact match.
             let count = content.matches(&args.old_string).count();
+
+            // If no exact match found, try fuzzy matching with normalized whitespace.
+            // This handles common LLM errors like trailing spaces, tab/space mixing,
+            // or line ending variations.
+            let (old_string_to_use, count) = if count == 0 {
+                let normalized_content = normalize_whitespace(&content);
+                let normalized_old = normalize_whitespace(&args.old_string);
+                let fuzzy_count = normalized_content.matches(&normalized_old).count();
+
+                if fuzzy_count == 1 {
+                    // Single fuzzy match found - use normalized version
+                    (normalized_old, fuzzy_count)
+                } else if fuzzy_count > 1 {
+                    // Multiple fuzzy matches - report as ambiguous
+                    return format!(
+                        "Error: old_string found {fuzzy_count} times in {} after \
+                         normalizing whitespace. The text must be unique. \
+                         Provide more surrounding context to make it unique.",
+                        args.path
+                    );
+                } else {
+                    // No fuzzy match either
+                    (args.old_string.clone(), 0)
+                }
+            } else {
+                (args.old_string.clone(), count)
+            };
 
             if count == 0 {
                 return format!(
                     "Error: old_string not found in {}. \
-                     Verify the exact text (including whitespace and indentation).",
+                     The text must match exactly including whitespace and indentation. \
+                     If the file has different line endings (CRLF vs LF), try the normalized version.",
                     args.path
                 );
             }
@@ -1108,7 +1149,7 @@ impl Tool for EditFile {
                 // Report line numbers of each match.
                 #[allow(clippy::string_slice)] // byte_offset from match_indices
                 let line_nums: Vec<usize> = content
-                    .match_indices(&args.old_string)
+                    .match_indices(&old_string_to_use)
                     .map(|(byte_offset, _)| content[..byte_offset].lines().count().max(1))
                     .collect();
                 return format!(
@@ -1125,9 +1166,9 @@ impl Tool for EditFile {
 
             // Perform replacement.
             let new_content = if replace_all {
-                content.replace(&args.old_string, &args.new_string)
+                content.replace(&old_string_to_use, &args.new_string)
             } else {
-                content.replacen(&args.old_string, &args.new_string, 1)
+                content.replacen(&old_string_to_use, &args.new_string, 1)
             };
 
             // Write back.
@@ -1139,9 +1180,12 @@ impl Tool for EditFile {
             tracker.record_write(&abs_path, &new_content);
 
             // Calculate affected line range for the first occurrence.
-            let start_byte = content.find(&args.old_string).unwrap();
+            // Use the original content for line calculation (not normalized).
+            let start_byte = content.find(&old_string_to_use).unwrap();
             #[allow(clippy::string_slice)] // start_byte from find()
             let start_line = content[..start_byte].lines().count().max(1);
+            // Use args.old_string for line count (works for both exact and fuzzy matches
+            // since the normalized version has the same number of lines)
             let end_line = start_line + args.old_string.lines().count().saturating_sub(1);
 
             if replace_all && count > 1 {
@@ -1286,7 +1330,16 @@ fn format_output(output: std::process::Output, lenient_exit_codes: &[i32]) -> St
             format!("[exit: {code}]\n{stdout}\n[stderr]\n{stderr}")
         }
     } else {
-        format!("[exit: {code}]\n{stdout}\n{stderr}")
+        let mut out = format!("Error [exit: {code}]");
+        if !stderr.is_empty() {
+            out.push_str(": ");
+            out.push_str(stderr.trim());
+        }
+        if !stdout.is_empty() {
+            out.push('\n');
+            out.push_str(&stdout);
+        }
+        out
     }
 }
 
@@ -1643,8 +1696,8 @@ mod tests {
         let tool = Shell::new("/tmp");
         let result = tool.execute(r#"{"command": "false"}"#).await;
         assert!(
-            result.starts_with("[exit: 1]"),
-            "expected [exit: 1] prefix, got: {result}"
+            result.starts_with("Error [exit: 1]"),
+            "expected Error [exit: 1] prefix, got: {result}"
         );
     }
 

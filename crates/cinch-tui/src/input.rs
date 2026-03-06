@@ -12,6 +12,11 @@ pub(crate) fn handle_key_event(
     app: &mut App,
     state: &Arc<Mutex<UiState>>,
 ) {
+    // Only process key-press events (ignore Release/Repeat from crossterm 0.27+).
+    if key.kind != crossterm::event::KeyEventKind::Press {
+        return;
+    }
+
     // Ctrl+C always quits.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
@@ -50,8 +55,9 @@ fn handle_normal_key(key: crossterm::event::KeyEvent, app: &mut App, state: &Arc
                     // Jump to tail so the user sees their message.
                     app.agent_cursor = usize::MAX;
                     app.agent_expanded = None;
+                    return;
                 }
-                return;
+                // Empty buffer: fall through so Enter can expand entries.
             }
             KeyCode::Esc => {
                 app.input_buffer.clear();
