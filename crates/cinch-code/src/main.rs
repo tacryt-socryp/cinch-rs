@@ -296,6 +296,7 @@ async fn main() {
             attempt += 1;
             let result = Harness::new(&client, &tools, harness_config.clone())
                 .with_event_handler(&ui_handler)
+                .with_ui_state(ui_state.clone())
                 .with_stop_signal(|| {
                     let s = ui_state_stop.lock().unwrap();
                     s.quit_requested || s.interrupt_requested

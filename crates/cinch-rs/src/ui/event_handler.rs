@@ -16,8 +16,7 @@ use std::sync::{Arc, Mutex};
 use crate::agent::events::{EventHandler, EventResponse, HarnessEvent};
 
 use super::{
-    ContextBreakdownSnapshot, ContextMessageInfo, ContextSnapshot, QuestionChoice,
-    QuestionResponse, UiState, UserQuestion, ask_question, poll_question, push_agent_text,
+    ContextBreakdownSnapshot, ContextMessageInfo, ContextSnapshot, UiState, push_agent_text,
     push_agent_text_delta, push_todo_update, push_tool_executing, push_tool_result,
     update_context_snapshot, update_phase, update_prompt_cache, update_round,
 };
@@ -82,51 +81,11 @@ impl EventHandler for UiEventHandler {
                 push_agent_text(&self.state, &format!("[phase] {from:?} \u{2192} {to:?}"));
             }
             HarnessEvent::PlanSubmitted { summary } => {
+                // Just push the plan text to the UI. Approval is handled
+                // asynchronously in handle_plan_submission via the harness's
+                // ui_state reference (which can use tokio::time::sleep instead
+                // of blocking the runtime thread).
                 push_agent_text(&self.state, &format!("[plan] {summary}"));
-
-                // Present approval question to the user.
-                // "Approve" accepts; "Suggest changes" lets them edit with feedback.
-                let question = UserQuestion {
-                    prompt: "Approve this plan? Select 'Suggest changes' and press 'e' to provide feedback.".into(),
-                    choices: vec![
-                        QuestionChoice {
-                            label: "Approve".into(),
-                            body: "Accept the plan and start execution.".into(),
-                            metadata: String::new(),
-                        },
-                        QuestionChoice {
-                            label: "Suggest changes".into(),
-                            body: "Type your feedback here".into(),
-                            metadata: String::new(),
-                        },
-                    ],
-                    editable: true,
-                    max_edit_length: Some(2000),
-                };
-                ask_question(&self.state, question, 300);
-
-                // Block until the user responds.
-                loop {
-                    if let Some(response) = poll_question(&self.state) {
-                        return match response {
-                            QuestionResponse::Selected(0)
-                            | QuestionResponse::TimedOut
-                            | QuestionResponse::Skipped => None, // approve
-                            QuestionResponse::SelectedEdited { edited_text, .. } => {
-                                if edited_text.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(EventResponse::Deny(edited_text))
-                                }
-                            }
-                            QuestionResponse::FreeText(text) if !text.trim().is_empty() => {
-                                Some(EventResponse::Deny(text))
-                            }
-                            _ => None, // approve by default
-                        };
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
             }
             HarnessEvent::Finished => {
                 update_phase(&self.state, "Finished");

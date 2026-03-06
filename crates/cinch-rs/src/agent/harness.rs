@@ -43,8 +43,12 @@ use crate::context::{ContextBudget, ContextUsage};
 use crate::tools::cache::ToolResultCache;
 use crate::tools::core::ToolSet;
 use crate::tools::filter::ToolFilter;
+use crate::ui::{
+    QuestionChoice, QuestionResponse, UiState, UserQuestion, ask_question, poll_question,
+};
 use crate::{Annotation, ChatRequest, Message, OpenRouterClient};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 // ── Harness ────────────────────────────────────────────────────────
@@ -101,6 +105,11 @@ pub struct Harness<'a> {
     shared_resources: Option<SharedResources>,
     /// Optional tool filter for dynamic tool selection.
     tool_filter: Option<ToolFilter>,
+    /// Optional UI state for plan approval questions. When set,
+    /// `handle_plan_submission` presents an interactive approval prompt
+    /// using `tokio::time::sleep` (non-blocking) instead of relying on the
+    /// sync `EventHandler::on_event` which would block the runtime.
+    ui_state: Option<Arc<Mutex<UiState>>>,
 }
 
 impl<'a> Harness<'a> {
@@ -115,6 +124,7 @@ impl<'a> Harness<'a> {
             stop_signal: None,
             shared_resources: None,
             tool_filter: None,
+            ui_state: None,
         }
     }
 
@@ -146,6 +156,15 @@ impl<'a> Harness<'a> {
     /// Attach a tool filter for dynamic tool selection.
     pub fn with_tool_filter(mut self, filter: ToolFilter) -> Self {
         self.tool_filter = Some(filter);
+        self
+    }
+
+    /// Attach UI state for interactive plan approval.
+    ///
+    /// When set, plan submissions will present an approval question to the
+    /// user via the TUI and wait for their response asynchronously.
+    pub fn with_ui_state(mut self, state: Arc<Mutex<UiState>>) -> Self {
+        self.ui_state = Some(state);
         self
     }
 
@@ -382,6 +401,9 @@ impl<'a> Harness<'a> {
 
         let mut tools_option = non_empty_tools(&current_tool_defs);
 
+        // ═══════════════════════════════════════════════════════════════
+        // MAIN ROUND LOOP
+        // ═══════════════════════════════════════════════════════════════
         for round in 0..self.config.max_rounds {
             // Check stop signal.
             if let Some(ref signal) = self.stop_signal
@@ -393,21 +415,8 @@ impl<'a> Harness<'a> {
 
             acc.rounds_used = round + 1;
 
-            // ── Model routing ──
-            let model_for_round = self
-                .config
-                .routing
-                .model_for_round(round, false)
-                .to_string();
-            if model_for_round != self.config.model {
-                self.event_handler.on_event(&HarnessEvent::ModelRouted {
-                    model: &model_for_round,
-                    round: round + 1,
-                });
-            }
-
-            // ── Context management (eviction + summarization) ──
-            evict_if_needed(
+            // ── Prepare round: model routing, context management, events ──
+            let model_for_round = prepare_round(
                 &self.config,
                 &self.context_budget,
                 &mut layout,
@@ -415,6 +424,8 @@ impl<'a> Harness<'a> {
                 round,
                 self.event_handler,
             );
+
+            // Summarization (context compaction) - async call
             summarize_if_needed(
                 &self.config,
                 self.client,
@@ -429,38 +440,21 @@ impl<'a> Harness<'a> {
             )
             .await;
 
-            // Context budget tracking and breakdown for round start event.
-            let api_messages = layout.to_messages();
-            let usage = self
-                .context_budget
-                .as_ref()
-                .map(|b| b.estimate_usage(&api_messages))
-                .unwrap_or(ContextUsage {
-                    estimated_tokens: 0,
-                    max_tokens: 0,
-                    usage_pct: 0.0,
-                });
-            let breakdown = layout.breakdown();
-            self.event_handler.on_event(&HarnessEvent::RoundStart {
-                round: round + 1,
-                max_rounds: self.config.max_rounds,
-                context_usage: &usage,
-                context_breakdown: Some(&breakdown),
-            });
-
-            // ── Context snapshot for visualization ──
+            // Emit context snapshot for visualization.
             let message_details = layout.message_details_with_cache(self.config.prompt_caching);
+            let breakdown = layout.breakdown();
             self.event_handler.on_event(&HarnessEvent::ContextSnapshot {
                 messages: &message_details,
                 max_tokens: self.config.context_window_tokens,
                 breakdown: &breakdown,
             });
 
-            // ── System reminders ──
+            // Inject system reminders.
             let round_ctx = RoundContext {
                 round: round + 1,
                 max_rounds: self.config.max_rounds,
-                context_usage_pct: usage.usage_pct,
+                context_usage_pct: breakdown.total_tokens as f64
+                    / self.config.context_window_tokens as f64,
                 total_tool_calls: modules.tool_metas.len(),
                 model: model_for_round.clone(),
             };
@@ -468,14 +462,9 @@ impl<'a> Harness<'a> {
             for text in &reminder_texts {
                 layout.push_message(Message::user(text));
             }
-            // Re-assemble messages if reminders were injected.
-            let api_messages = if reminder_texts.is_empty() {
-                api_messages
-            } else {
-                layout.to_messages()
-            };
 
-            // ── Send request ──
+            // ── Send request and process completion ──
+            let api_messages = layout.to_messages();
             let completion = send_round_request(
                 &self.config,
                 self.client,
@@ -487,78 +476,44 @@ impl<'a> Harness<'a> {
             )
             .await?;
 
-            // Track token usage and cost.
-            if let Some(ref u) = completion.usage {
-                let pt = u.prompt_tokens.unwrap_or(0);
-                let ct = u.completion_tokens.unwrap_or(0);
-                acc.cost_tracker.record(pt, ct, &pricing);
-                self.event_handler.on_event(&HarnessEvent::TokenUsage {
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                });
-
-                // Emit prompt cache stats when available.
-                if let Some(ref details) = u.prompt_tokens_details {
-                    let cached = details.cached_tokens.unwrap_or(0);
-                    let written = details.cache_write_tokens.unwrap_or(0);
-                    if cached > 0 || written > 0 {
-                        self.event_handler
-                            .on_event(&HarnessEvent::PromptCacheStats {
-                                cached_tokens: cached,
-                                cache_write_tokens: written,
-                            });
-                    }
-                }
-            }
-
-            // Emit reasoning content if present.
-            if let Some(ref reasoning) = completion.reasoning
-                && !reasoning.is_empty()
-            {
-                self.event_handler
-                    .on_event(&HarnessEvent::Reasoning(reasoning));
-            }
-
-            // Emit text.
-            if let Some(ref text) = completion.content
-                && !text.is_empty()
-            {
-                self.event_handler.on_event(&HarnessEvent::Text(text));
-                acc.text_output.push(text.clone());
-            }
+            // Track token usage and cost, emit events.
+            process_completion(&completion, &pricing, &mut acc, self.event_handler);
 
             // ── Plan-execute: intercept submit_plan ──
-            if phase == Phase::Planning
-                && let Some(transition) = handle_plan_submission(
+            if phase == Phase::Planning {
+                match handle_plan_submission(
                     &self.config,
                     self.tools,
                     &completion,
                     &mut layout,
                     acc.rounds_used,
                     self.event_handler,
+                    self.ui_state.as_ref(),
                 )
                 .await
-            {
-                phase = Phase::Executing;
-                current_tool_defs = full_tool_defs.clone();
-                tools_option = non_empty_tools(&current_tool_defs);
-                if transition.should_continue {
-                    continue;
+                {
+                    PlanSubmissionResult::Approved { should_continue } => {
+                        phase = Phase::Executing;
+                        current_tool_defs = full_tool_defs.clone();
+                        tools_option = non_empty_tools(&current_tool_defs);
+                        if should_continue {
+                            continue;
+                        }
+                    }
+                    PlanSubmissionResult::Rejected => {
+                        // Plan was rejected — stay in Planning, continue to next round.
+                        continue;
+                    }
+                    PlanSubmissionResult::NotSubmitted => {
+                        // Normal planning round — fall through to tool execution.
+                    }
                 }
             }
 
             // Collect annotations (after all borrows of `completion` are done).
             acc.annotations.extend(completion.annotations);
 
-            // If no tool calls at all, the agent is done — unless the API
-            // returned an empty/malformed response (no content, no tool calls,
-            // near-zero tokens). In that case, retry instead of exiting.
-            //
-            // Note: pseudo-tool-only rounds (think, todo) are NOT treated as
-            // stop signals. The agent may call `todo(add)` or `think` while
-            // planning and still intend to continue with real tool calls on the
-            // next round. Pseudo-tool calls flow through the normal execution
-            // path below and the agent gets another round.
+            // ── Check for completion (no tool calls) ──
             if completion.tool_calls.is_empty() {
                 let has_content = completion.content.as_ref().is_some_and(|c| !c.is_empty());
                 let completion_tokens = completion
@@ -567,10 +522,7 @@ impl<'a> Harness<'a> {
                     .and_then(|u| u.completion_tokens)
                     .unwrap_or(0);
 
-                // An empty response is one where the API returned nothing
-                // useful: no text, no tool calls, and essentially zero
-                // completion tokens. This typically means an OpenRouter
-                // transient failure that returned HTTP 200 with an empty body.
+                // Handle empty responses with retry logic.
                 if !has_content && completion_tokens == 0 {
                     empty_response_retries += 1;
                     if empty_response_retries <= MAX_EMPTY_RESPONSE_RETRIES {
@@ -586,7 +538,6 @@ impl<'a> Harness<'a> {
                         .await;
                         continue;
                     }
-                    // Exhausted retries — fall through to the normal exit.
                     warn!(
                         "Empty API response persisted after {MAX_EMPTY_RESPONSE_RETRIES} retries. \
                          Treating as agent completion."
@@ -598,8 +549,7 @@ impl<'a> Harness<'a> {
                 break;
             }
 
-            // Reset empty-response counter on any successful round with
-            // real tool calls.
+            // Reset empty-response counter on any successful round with real tool calls.
             empty_response_retries = 0;
 
             // ── Execute tool calls ──
@@ -653,9 +603,7 @@ impl<'a> Harness<'a> {
                 }
             }
 
-            // Post-round stop signal check — break immediately instead of
-            // waiting for the next round's pre-check. This ensures that an
-            // interrupt triggered mid-stream takes effect right away.
+            // Post-round stop signal check.
             if let Some(ref signal) = self.stop_signal
                 && signal()
             {
@@ -1080,11 +1028,7 @@ fn evict_if_needed(
     }
 }
 
-/// Summarize (compact) middle-zone messages when context usage is still over 80% after eviction.
-///
-/// Uses the [`ContextLayout`]'s compaction API: reads compactable messages from the
-/// middle zone, sends them to the summarizer LLM, and applies the result via
-/// [`apply_compaction()`](ContextLayout::apply_compaction).
+/// Summarize (compact) middle-zone messages when context usage exceeds threshold.
 ///
 /// This is a thin wrapper around [`compact_if_needed()`] called at the start of
 /// each round.
@@ -1243,14 +1187,18 @@ pub(crate) async fn compact_if_needed(
 }
 
 /// Whether the main loop should `continue` to the next round after a plan transition.
-struct PlanTransition {
-    should_continue: bool,
+/// Result of checking for a plan submission in the current round.
+enum PlanSubmissionResult {
+    /// No submit_plan call found — normal planning round.
+    NotSubmitted,
+    /// Plan submitted and approved — transition to execution.
+    Approved { should_continue: bool },
+    /// Plan submitted but rejected by the user — stay in planning.
+    Rejected,
 }
 
 /// Check if the LLM submitted a plan during the planning phase, and if so,
-/// handle the transition to execution phase.
-///
-/// Returns `Some(PlanTransition)` if the phase transitioned, `None` otherwise.
+/// handle the transition to execution phase or rejection.
 async fn handle_plan_submission(
     config: &HarnessConfig,
     tools: &ToolSet,
@@ -1258,7 +1206,8 @@ async fn handle_plan_submission(
     layout: &mut ContextLayout,
     rounds_used: u32,
     event_handler: &dyn EventHandler,
-) -> Option<PlanTransition> {
+    ui_state: Option<&Arc<Mutex<UiState>>>,
+) -> PlanSubmissionResult {
     let submit_idx = completion
         .tool_calls
         .iter()
@@ -1306,15 +1255,62 @@ async fn handle_plan_submission(
             full_plan.push_str(&format!("\n\nVerification: {verification_text}"));
         }
 
-        // Fire PlanSubmitted event — the handler can approve (None/Approve)
-        // or reject (Deny(feedback)) the plan.
-        let response = event_handler.on_event(&HarnessEvent::PlanSubmitted {
+        // Fire PlanSubmitted event (pushes plan text to UI output).
+        event_handler.on_event(&HarnessEvent::PlanSubmitted {
             summary: &full_plan,
         });
 
+        // If we have UI state, present an interactive approval question and
+        // wait for the user's response using async sleep (non-blocking).
+        let rejected_feedback = if let Some(state) = ui_state {
+            let question = UserQuestion {
+                prompt:
+                    "Approve this plan? Select 'Suggest changes' and press 'e' to provide feedback."
+                        .into(),
+                choices: vec![
+                    QuestionChoice {
+                        label: "Approve".into(),
+                        body: "Accept the plan and start execution.".into(),
+                        metadata: String::new(),
+                    },
+                    QuestionChoice {
+                        label: "Suggest changes".into(),
+                        body: "Type your feedback here".into(),
+                        metadata: String::new(),
+                    },
+                ],
+                editable: true,
+                max_edit_length: Some(2000),
+            };
+            ask_question(state, question, 300);
+
+            // Poll for user response using async sleep (doesn't block runtime).
+            loop {
+                if let Some(response) = poll_question(state) {
+                    break match response {
+                        QuestionResponse::Selected(0)
+                        | QuestionResponse::TimedOut
+                        | QuestionResponse::Skipped => None, // approve
+                        QuestionResponse::SelectedEdited { edited_text, .. } => {
+                            if edited_text.trim().is_empty() {
+                                None
+                            } else {
+                                Some(edited_text)
+                            }
+                        }
+                        QuestionResponse::FreeText(text) if !text.trim().is_empty() => Some(text),
+                        _ => None, // approve by default
+                    };
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        } else {
+            None // No UI — auto-approve.
+        };
+
         layout.push_message(Message::assistant_tool_calls(completion.tool_calls.clone()));
 
-        if let Some(EventResponse::Deny(feedback)) = response {
+        if let Some(feedback) = rejected_feedback {
             // Plan rejected — stay in Planning phase, send feedback to agent.
             for call in &completion.tool_calls {
                 if PlanExecuteConfig::is_plan_submission(&call.function.name) {
@@ -1332,8 +1328,7 @@ async fn handle_plan_submission(
                 }
             }
 
-            // Stay in Planning — return None so the caller doesn't transition.
-            return None;
+            return PlanSubmissionResult::Rejected;
         }
 
         // Plan approved — transition to execution.
@@ -1364,9 +1359,9 @@ async fn handle_plan_submission(
             .replace("{plan_summary}", &full_plan);
         layout.push_message(Message::user(&exec_prompt));
 
-        return Some(PlanTransition {
+        return PlanSubmissionResult::Approved {
             should_continue: true,
-        });
+        };
     }
 
     // Check if planning phase exceeded its round budget.
@@ -1380,15 +1375,115 @@ async fn handle_plan_submission(
             to: &Phase::Executing,
         });
         layout.push_message(Message::user(&config.plan_execute.config.execution_prompt));
-        return Some(PlanTransition {
+        return PlanSubmissionResult::Approved {
             should_continue: false,
-        });
+        };
     }
 
-    None
+    PlanSubmissionResult::NotSubmitted
 }
 
 // ── Small helpers ──────────────────────────────────────────────────
+
+/// Prepare a round: model routing, context eviction/summarization, emit RoundStart event.
+///
+/// Returns the model identifier to use for this round.
+fn prepare_round(
+    config: &HarnessConfig,
+    context_budget: &Option<ContextBudget>,
+    layout: &mut ContextLayout,
+    tool_metas: &[ToolResultMeta],
+    round: u32,
+    event_handler: &dyn EventHandler,
+) -> String {
+    // Model routing
+    let model_for_round = config.routing.model_for_round(round, false).to_string();
+    if model_for_round != config.model {
+        event_handler.on_event(&HarnessEvent::ModelRouted {
+            model: &model_for_round,
+            round: round + 1,
+        });
+    }
+
+    // Context management (eviction + summarization)
+    evict_if_needed(
+        config,
+        context_budget,
+        layout,
+        tool_metas,
+        round,
+        event_handler,
+    );
+
+    // Note: summarization is async, so we call it via atokio::spawn or inline
+    // For simplicity, we handle it inline in the main loop after this returns
+
+    // Context budget tracking and breakdown for round start event.
+    let api_messages = layout.to_messages();
+    let usage = context_budget
+        .as_ref()
+        .map(|b| b.estimate_usage(&api_messages))
+        .unwrap_or(ContextUsage {
+            estimated_tokens: 0,
+            max_tokens: 0,
+            usage_pct: 0.0,
+        });
+    let breakdown = layout.breakdown();
+    event_handler.on_event(&HarnessEvent::RoundStart {
+        round: round + 1,
+        max_rounds: config.max_rounds,
+        context_usage: &usage,
+        context_breakdown: Some(&breakdown),
+    });
+
+    model_for_round
+}
+
+/// Process a completion response: track token usage, emit events for reasoning/text.
+fn process_completion(
+    completion: &crate::ChatCompletion,
+    pricing: &crate::api::tracing::ModelPricing,
+    acc: &mut RunAccumulator,
+    event_handler: &dyn EventHandler,
+) {
+    // Track token usage and cost.
+    if let Some(ref u) = completion.usage {
+        let pt = u.prompt_tokens.unwrap_or(0);
+        let ct = u.completion_tokens.unwrap_or(0);
+        acc.cost_tracker.record(pt, ct, pricing);
+        event_handler.on_event(&HarnessEvent::TokenUsage {
+            prompt_tokens: pt,
+            completion_tokens: ct,
+        });
+
+        // Emit prompt cache stats when available.
+        if let Some(ref details) = u.prompt_tokens_details {
+            let cached = details.cached_tokens.unwrap_or(0);
+            let written = details.cache_write_tokens.unwrap_or(0);
+            if cached > 0 || written > 0 {
+                event_handler.on_event(&HarnessEvent::PromptCacheStats {
+                    cached_tokens: cached,
+                    cache_write_tokens: written,
+                });
+            }
+        }
+    }
+
+    // Emit reasoning content if present.
+    if let Some(ref reasoning) = completion.reasoning
+        && !reasoning.is_empty()
+    {
+        event_handler.on_event(&HarnessEvent::Reasoning(reasoning));
+    }
+
+    // Emit text.
+    if let Some(ref text) = completion.content
+        && !text.is_empty()
+    {
+        event_handler.on_event(&HarnessEvent::Text(text));
+        acc.text_output.push(text.clone());
+    }
+}
 
 /// Convert tool defs to `Option`, returning `None` if empty.
 fn non_empty_tools(defs: &[crate::ToolDef]) -> Option<Vec<crate::ToolDef>> {
