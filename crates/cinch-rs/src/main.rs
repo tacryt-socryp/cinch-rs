@@ -416,6 +416,7 @@ fn build_request_body(
                 Some(cli.provider.clone())
             },
             allow_fallbacks: cli.allow_fallbacks,
+            sort: None,
         })
     } else {
         None

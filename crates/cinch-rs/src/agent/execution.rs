@@ -54,6 +54,7 @@ pub(crate) async fn send_round_request(
         plugins: config.plugins.clone(),
         reasoning: config.reasoning.clone(),
         response_format,
+        provider: config.provider.clone(),
         ..Default::default()
     };
 

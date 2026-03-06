@@ -293,6 +293,8 @@ pub struct HarnessConfig {
     ///
     /// Default: `false`.
     pub prompt_caching: bool,
+    /// OpenRouter provider routing preferences (sort, order, fallbacks).
+    pub provider: Option<crate::ProviderPreferences>,
 }
 
 impl HarnessConfig {
@@ -527,6 +529,7 @@ impl Default for HarnessConfig {
             progressive_tools: false,
             use_prompt_registry: false,
             prompt_caching: false,
+            provider: None,
         }
     }
 }

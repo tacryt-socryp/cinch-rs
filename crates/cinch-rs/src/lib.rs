@@ -314,12 +314,15 @@ pub struct ResponseFormat {
 }
 
 /// Provider routing preferences.
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct ProviderPreferences {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_fallbacks: Option<bool>,
+    /// Sort strategy: `"price"`, `"throughput"`, or `"latency"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
 }
 
 // ── Plugin types ───────────────────────────────────────────────────

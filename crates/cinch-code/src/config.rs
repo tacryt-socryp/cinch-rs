@@ -72,6 +72,11 @@ impl CodeConfig {
             .with_approval_required_tools(vec![GIT_COMMIT.to_string(), GIT_CHECKOUT.to_string()]);
 
         config.session.sessions_dir = sessions_dir;
+        config.provider = Some(cinch_rs::ProviderPreferences {
+            order: None,
+            allow_fallbacks: None,
+            sort: Some("throughput".into()),
+        });
 
         config
     }
