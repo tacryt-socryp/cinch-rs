@@ -69,7 +69,7 @@ pub struct ReadFileArgs {
 pub struct ListDirArgs {
     /// Directory path relative to repo root (e.g. 'docs/').
     pub path: String,
-    /// Maximum directory depth to recurse into. Default: 3.
+    /// Maximum directory depth to recurse into. Default: 1.
     #[serde(default)]
     pub depth: Option<u32>,
 }
@@ -295,7 +295,7 @@ impl ListDir {
 }
 
 /// Default maximum depth for `list_dir`.
-const DEFAULT_LIST_DIR_DEPTH: u32 = 3;
+const DEFAULT_LIST_DIR_DEPTH: u32 = 1;
 
 impl Tool for ListDir {
     fn definition(&self) -> ToolDef {
@@ -398,13 +398,16 @@ async fn collect_dir_entries(
 
     let indent = "  ".repeat(current_depth);
     for (name, ft) in &children {
-        // Skip noisy/internal entries at the repo root.
-        if current_depth == 0 && matches!(name.as_str(), ".git" | ".agents") {
-            continue;
-        }
         if name == ".DS_Store" {
             continue;
         }
+
+        // Show noisy/internal directories but don't recurse into them.
+        let skip_recurse = current_depth == 0
+            && matches!(
+                name.as_str(),
+                ".git" | ".agents" | "target" | "node_modules"
+            );
 
         let suffix = if ft.is_dir() {
             "/"
@@ -416,7 +419,7 @@ async fn collect_dir_entries(
         out.push(format!("{indent}{name}{suffix}"));
 
         // Recurse into subdirectories if within depth.
-        if ft.is_dir() && current_depth < max_depth {
+        if ft.is_dir() && current_depth < max_depth && !skip_recurse {
             let child_path = dir.join(name);
             // Best-effort: skip directories we can't read.
             let _ = Box::pin(collect_dir_entries(
@@ -1433,15 +1436,16 @@ mod tests {
 
         let tool = ListDir::new(dir.path().to_str().unwrap());
         let result = tool.execute(r#"{"path": "."}"#).await;
-        // Default depth 3: should see a/, a/file.txt, a/b/, a/b/deep.txt
+        // Default depth 1: should see a/, a/file.txt, a/b/ but NOT a/b/deep.txt
         assert!(result.contains("a/"), "expected 'a/', got:\n{result}");
         assert!(
             result.contains("file.txt"),
             "expected file.txt, got:\n{result}"
         );
+        assert!(result.contains("b/"), "expected 'b/', got:\n{result}");
         assert!(
-            result.contains("deep.txt"),
-            "expected deep.txt at depth 3, got:\n{result}"
+            !result.contains("deep.txt"),
+            "deep.txt should be beyond default depth, got:\n{result}"
         );
     }
 
