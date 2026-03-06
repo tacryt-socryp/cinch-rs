@@ -89,7 +89,7 @@ impl App {
             agent_expand_scroll: 0,
             expand_line_cache: HashMap::new(),
             expand_cache_entry_count: 0,
-            input_focused: false,
+            input_focused: true,
         }
     }
 }
