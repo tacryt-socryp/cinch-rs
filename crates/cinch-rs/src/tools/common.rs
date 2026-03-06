@@ -529,10 +529,8 @@ impl Tool for Grep {
             let mode = args.mode.as_deref().unwrap_or("files");
 
             // Use ripgrep (rg) — fast, respects .gitignore, skips .git/target.
-            let mut cmd_args: Vec<String> = vec![
-                "--color=never".to_string(),
-                "--no-heading".to_string(),
-            ];
+            let mut cmd_args: Vec<String> =
+                vec!["--color=never".to_string(), "--no-heading".to_string()];
 
             match mode {
                 "files" => {

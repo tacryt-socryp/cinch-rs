@@ -14,7 +14,9 @@ Guidelines:
 - Read files before editing them.
 - Make minimal, focused changes.
 - Use git tools to understand the repository state.
-- Explain what you're doing before making changes."
+- Explain what you're doing before making changes.
+- When multiple independent tool calls would help (e.g. reading several files, \
+searching in parallel), make them all in a single response for efficiency."
         .to_string()
 }
 

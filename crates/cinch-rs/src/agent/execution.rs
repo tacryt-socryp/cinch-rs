@@ -51,6 +51,7 @@ pub(crate) async fn send_round_request(
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         tools: tools_option.clone(),
+        parallel_tool_calls: Some(true),
         plugins: config.plugins.clone(),
         reasoning: config.reasoning.clone(),
         response_format,

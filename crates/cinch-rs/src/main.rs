@@ -464,6 +464,7 @@ fn build_request_body(
         provider,
         transforms,
         tools,
+        parallel_tool_calls: None,
         plugins,
         reasoning: None,
     }
