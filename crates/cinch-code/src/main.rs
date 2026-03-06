@@ -108,41 +108,18 @@ fn load_session(sessions_dir: &std::path::Path, resume_id: &str) -> Result<Resum
     })
 }
 
-/// Ask the user for free-text input via the TUI question system.
+/// Wait for the user to send a message via the persistent input bar.
+///
+/// The user stays in Normal mode with full navigation (scrolling, expand,
+/// context view, etc.) and presses `i` to type when ready.
 async fn get_user_input(ui_state: &Arc<Mutex<UiState>>) -> Option<String> {
-    let question = UserQuestion {
-        prompt: "Enter your message".to_string(),
-        choices: vec![],
-        editable: false,
-        max_edit_length: None,
-    };
-    ask_question(ui_state, question, 86400);
-
     loop {
         if ui_state.lock().unwrap().quit_requested {
             return None;
         }
-        // Check if a message was sent via the persistent input bar.
         let pending = drain_pending_messages(ui_state);
         if let Some(first) = pending.into_iter().next() {
-            // Cancel the active question since we have input now.
-            {
-                let mut s = ui_state.lock().unwrap();
-                if let Some(ref mut aq) = s.active_question {
-                    aq.response = Some(QuestionResponse::Skipped);
-                    aq.done = true;
-                }
-            }
-            // Drain the question so poll_question doesn't interfere.
-            let _ = poll_question(ui_state);
             return Some(first);
-        }
-        if let Some(response) = poll_question(ui_state) {
-            return match response {
-                QuestionResponse::FreeText(text) => Some(text),
-                QuestionResponse::Skipped | QuestionResponse::TimedOut => None,
-                _ => None,
-            };
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
