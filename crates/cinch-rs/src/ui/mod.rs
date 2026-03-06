@@ -199,6 +199,9 @@ pub struct UiState {
     /// The frontend sets this to `true` when the user wants to interrupt
     /// the current agent task without quitting the application.
     pub interrupt_requested: bool,
+    /// Set to `true` when the agent loop is waiting for user input
+    /// (not running the harness). Used by the TUI to show idle hints.
+    pub waiting_for_input: bool,
 
     // ── Active question (human-in-the-loop) ──
     pub active_question: Option<ActiveQuestion>,
@@ -243,6 +246,7 @@ impl Default for UiState {
             running: true,
             quit_requested: false,
             interrupt_requested: false,
+            waiting_for_input: false,
             active_question: None,
             next_cycle_at: None,
             context_snapshot: None,

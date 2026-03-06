@@ -253,6 +253,7 @@ async fn main() {
     {
         let first_prompt = if cli.resume.is_some() {
             // Resuming — get a new user message to continue the conversation.
+            ui_state.lock().unwrap().waiting_for_input = true;
             match get_user_input(&ui_state).await {
                 Some(text) => text,
                 None => {
@@ -264,6 +265,7 @@ async fn main() {
         } else if let Some(p) = cli.prompt {
             p
         } else {
+            ui_state.lock().unwrap().waiting_for_input = true;
             match get_user_input(&ui_state).await {
                 Some(text) => text,
                 None => {
@@ -274,6 +276,7 @@ async fn main() {
             }
         };
 
+        ui_state.lock().unwrap().waiting_for_input = false;
         push_user_message(&ui_state, &first_prompt);
         messages.push(Message::user(&first_prompt));
     }
@@ -365,10 +368,14 @@ async fn main() {
             break;
         }
 
+        // Signal that the agent is idle and waiting for user input.
+        ui_state.lock().unwrap().waiting_for_input = true;
+
         // Drain any messages sent via the persistent input bar while the
         // agent was running. If present, skip the blocking input prompt.
         let pending = drain_pending_messages(&ui_state);
         if !pending.is_empty() {
+            ui_state.lock().unwrap().waiting_for_input = false;
             for msg in pending {
                 messages.push(Message::user(&msg));
             }
@@ -378,6 +385,7 @@ async fn main() {
         // Get next user input.
         match get_user_input(&ui_state).await {
             Some(text) => {
+                ui_state.lock().unwrap().waiting_for_input = false;
                 push_user_message(&ui_state, &text);
                 messages.push(Message::user(&text));
             }
